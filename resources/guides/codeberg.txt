@@ -1,0 +1,14 @@
+@nokey Generate the key. ssh-keygen asks for an optional passphrase:
+@nokey   {{KEYGEN_COMMAND}}
+@clip The public key is on the clipboard.
+@noclip Copy the public key:
+@noclip   cat {{PUBKEY_PATH}}
+Register the key on Codeberg as {{USERNAME}}:
+  1. Open {{SETTINGS_URL}} and sign in as {{USERNAME}}.
+     (Avatar > Settings > SSH / GPG Keys)
+  2. Click "Add Key" under "Manage SSH Keys".
+  3. Key Name: a name for this machine, for example "gitum {{PLATFORM_DIR}}".
+  4. Content: paste the public key.
+  5. Click "Add Key".
+  6. Optional: click "Verify" next to the key and run the command it shows.
+Then run: gitum test {{PLATFORM_DIR}} {{USERNAME}}

@@ -1,0 +1,14 @@
+@nokey Generate the key. ssh-keygen asks for an optional passphrase:
+@nokey   {{KEYGEN_COMMAND}}
+@clip The public key is on the clipboard.
+@noclip Copy the public key:
+@noclip   cat {{PUBKEY_PATH}}
+Register the key on GitLab as {{USERNAME}}:
+  1. Open {{SETTINGS_URL}} and sign in as {{USERNAME}}.
+     (Avatar > Edit profile > SSH keys)
+  2. Click "Add new key".
+  3. Key: paste the public key.
+  4. Title: a name for this machine, for example "gitum {{PLATFORM_DIR}}".
+  5. Usage type: "Authentication". Expiration date: optional.
+  6. Click "Add key".
+Then run: gitum test {{PLATFORM_DIR}} {{USERNAME}}

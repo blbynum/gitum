@@ -1,0 +1,10 @@
+# type	host	ssh_user	key_type	settings_url	greeting
+github	github.com	git	ed25519	https://github.com/settings/keys	Hi {{USERNAME}}!
+gitlab	gitlab.com	git	ed25519	https://gitlab.com/-/user_settings/ssh_keys	Welcome to GitLab, @{{USERNAME}}!
+bitbucket	bitbucket.org	git	ed25519	https://bitbucket.org/account/settings/ssh-keys/	authenticated via ssh key
+forgejo	-	git	ed25519	https://{{HOST}}/user/settings/keys	Hi there, {{USERNAME}}!
+codeberg	codeberg.org	git	ed25519	https://codeberg.org/user/settings/keys	Hi there, {{USERNAME}}!
+gitea	-	git	ed25519	https://{{HOST}}/user/settings/keys	Hi there, {{USERNAME}}!
+azure-devops	ssh.dev.azure.com	git	rsa	https://dev.azure.com/<organization>/_usersSettings/keys	Shell access is not supported
+sourcehut	git.sr.ht	git	ed25519	https://meta.sr.ht/keys	Hi {{USERNAME}}!
+other	-	git	ed25519	-	-

@@ -1,0 +1,10 @@
+@nokey Generate the key. ssh-keygen asks for an optional passphrase:
+@nokey   {{KEYGEN_COMMAND}}
+@clip The public key is on the clipboard.
+@noclip Copy the public key:
+@noclip   cat {{PUBKEY_PATH}}
+Register the key on sourcehut as {{USERNAME}}:
+  1. Open {{SETTINGS_URL}} and sign in as {{USERNAME}}.
+  2. Paste the public key into the SSH key text field.
+  3. Click "Add key".
+Then run: gitum test {{PLATFORM_DIR}} {{USERNAME}}

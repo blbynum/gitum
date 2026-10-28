@@ -1,0 +1,11 @@
+@nokey Generate the key. ssh-keygen asks for an optional passphrase:
+@nokey   {{KEYGEN_COMMAND}}
+@clip The public key is on the clipboard.
+@noclip Copy the public key:
+@noclip   cat {{PUBKEY_PATH}}
+Register the key on {{HOST}} as {{USERNAME}}:
+  1. Sign in to {{HOST}} as {{USERNAME}} and open the SSH keys page of your account settings.
+  2. Add a key: name it after this machine, for example "gitum {{PLATFORM_DIR}}", and paste the public key.
+  3. Save it.
+gitum test only checks that {{HOST}} accepts the key: it does not know this platform's greeting.
+Then run: gitum test {{PLATFORM_DIR}} {{USERNAME}}

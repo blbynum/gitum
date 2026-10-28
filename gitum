@@ -1,0 +1,1037 @@
+#!/usr/bin/env bash
+# gitum - Git User Manager
+#
+# The directory a repository lives in decides which account authors its
+# commits and which SSH key reaches its remote. Repositories outside an
+# account directory have no identity and no key.
+#
+# https://github.com/blbynum/gitum
+
+set -u
+shopt -u patsub_replacement 2>/dev/null || true
+
+VERSION=0.1.0
+
+# ---------------------------------------------------------------- locations
+
+resolve_self() {
+  local self=$1 dir
+  while [ -L "$self" ]; do
+    dir=$(cd -P "$(dirname "$self")" && pwd -P)
+    self=$(readlink "$self")
+    case $self in
+      /*) ;;
+      *) self="$dir/$self" ;;
+    esac
+  done
+  cd -P "$(dirname "$self")" && pwd -P
+}
+
+GITUM_HOME=$(resolve_self "${BASH_SOURCE[0]}")
+PLATFORMS_TSV="$GITUM_HOME/resources/platforms.tsv"
+GUIDES_DIR="$GITUM_HOME/resources/guides"
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gitum"
+CONFIG_FILE="$CONFIG_DIR/config"
+GITUM_GITCONFIG="$CONFIG_DIR/gitconfig"
+ACCOUNTS_DIR="$CONFIG_DIR/accounts"
+KEY_DIR="$HOME/.ssh/gitum"
+GLOBAL_GITCONFIG="$HOME/.gitconfig"
+SSH_CONFIG="$HOME/.ssh/config"
+STANDARD_SUBDIRS="apps contrib my view"
+
+ROOT=""
+P_TYPE="" P_HOST="" P_SSH_USER="" P_KEY_TYPE="" P_SETTINGS_URL="" P_GREETING=""
+R_SCHEME="" R_HOST="" R_PATH=""
+A_DIR="" A_USER="" A_TYPE="" A_HOST="" A_SSH_USER=""
+SSH_OVERLAP=0
+G_SETTINGS_URL="" G_PUBKEY_PATH="" G_USERNAME="" G_HOST="" G_PLATFORM_DIR="" G_KEYGEN_COMMAND=""
+
+# ---------------------------------------------------------------- output
+
+say() { printf '%s\n' "$*"; }
+warn() { printf 'gitum: warning: %s\n' "$*" >&2; }
+die() { printf 'gitum: %s\n' "$*" >&2; exit 1; }
+usage_error() {
+  printf 'gitum: %s\n' "$*" >&2
+  printf 'Run "gitum help" for usage.\n' >&2
+  exit 2
+}
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+# indent PREFIX TEXT: print TEXT with PREFIX before every line.
+indent() {
+  local prefix=$1 line=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '%s%s\n' "$prefix" "$line"
+  done <<< "$2"
+}
+
+usage() {
+  cat <<EOF
+gitum $VERSION - Git User Manager
+
+Usage: gitum <command> [arguments]
+
+Commands:
+  init [--root <path>]                   Choose the source root and apply the git config
+  add [<type>] [<username>]              Add an account: directory tree, config, SSH key
+  test [<platform> <username>]           Test SSH authentication for one or all accounts
+  list [<platform>]                      List accounts
+  search <term>...                       Find projects under the root by path
+  adopt <platform> <username> <path>...  Move repositories into an account directory
+  delete <platform> <username>           Remove an account
+  help                                   Show this help
+  --version                              Show the version
+
+<type> is a platform type from resources/platforms.tsv (github, gitlab, ...).
+<platform> is the platform directory name under the root (github, forgejo-work, ...).
+EOF
+}
+
+# ---------------------------------------------------------------- paths
+
+expand_tilde() {
+  case $1 in
+    '~') printf '%s\n' "$HOME" ;;
+    '~/'*) printf '%s/%s\n' "$HOME" "${1#"~/"}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+# physical_dir DIR: the physical absolute path of an existing directory.
+physical_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
+
+# abs_path PATH: absolute path; the last component may not exist yet.
+abs_path() {
+  local p parent base
+  p=$(expand_tilde "$1")
+  case $p in
+    /*) ;;
+    *) p="$PWD/$p" ;;
+  esac
+  if [ -d "$p" ]; then
+    physical_dir "$p"
+    return
+  fi
+  parent=$(dirname "$p")
+  base=$(basename "$p")
+  parent=$(physical_dir "$parent") || return 1
+  printf '%s/%s\n' "$parent" "$base"
+}
+
+# display_path PATH: PATH with the home directory shown as ~.
+display_path() {
+  case $1 in
+    "$HOME") printf '~\n' ;;
+    "$HOME"/*) printf '~/%s\n' "${1#"$HOME"/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- prompts
+
+# prompt_line VAR TEXT [DEFAULT]: read one line; empty input takes DEFAULT.
+prompt_line() {
+  local pl_var=$1 pl_text=$2 pl_default=${3:-} pl_reply=""
+  if [ -n "$pl_default" ]; then
+    printf '%s [%s]: ' "$pl_text" "$pl_default"
+  else
+    printf '%s: ' "$pl_text"
+  fi
+  IFS= read -r pl_reply || { printf '\n'; die "aborted: no more input"; }
+  [ -n "$pl_reply" ] || pl_reply=$pl_default
+  printf -v "$pl_var" '%s' "$pl_reply"
+}
+
+# prompt_required VAR TEXT [DEFAULT]: like prompt_line, but repeats until non-empty.
+prompt_required() {
+  local pr_var=$1
+  while :; do
+    prompt_line "$pr_var" "$2" "${3:-}"
+    [ -n "${!pr_var}" ] && return 0
+    say "A value is required."
+  done
+}
+
+# prompt_path VAR TEXT [DEFAULT]: like prompt_line, with tab completion.
+prompt_path() {
+  local pp_var=$1 pp_text=$2 pp_default=${3:-} pp_reply=""
+  if [ -n "$pp_default" ]; then
+    printf '%s [%s]: ' "$pp_text" "$pp_default"
+  else
+    printf '%s: ' "$pp_text"
+  fi
+  IFS= read -e -r pp_reply || { printf '\n'; die "aborted: no more input"; }
+  [ -n "$pp_reply" ] || pp_reply=$pp_default
+  printf -v "$pp_var" '%s' "$pp_reply"
+}
+
+# confirm TEXT DEFAULT(y|n): returns 0 for yes.
+confirm() {
+  local text=$1 default=$2 reply="" hint
+  if [ "$default" = y ]; then hint='[Y/n]'; else hint='[y/N]'; fi
+  printf '%s %s ' "$text" "$hint"
+  IFS= read -r reply || { printf '\n'; die "aborted: no more input"; }
+  [ -n "$reply" ] || reply=$default
+  case $reply in
+    y|Y|yes|Yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------- state
+
+load_config() {
+  local line=""
+  ROOT=""
+  [ -f "$CONFIG_FILE" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      root=*) ROOT=${line#root=} ;;
+    esac
+  done < "$CONFIG_FILE"
+  [ -n "$ROOT" ]
+}
+
+save_config() {
+  mkdir -p "$CONFIG_DIR" || die "cannot create $CONFIG_DIR"
+  printf 'root=%s\n' "$ROOT" > "$CONFIG_FILE" || die "cannot write $CONFIG_FILE"
+}
+
+require_init() {
+  load_config || die "not set up yet. Run install.sh first (or: gitum init)."
+}
+
+# ---------------------------------------------------------------- platforms
+
+# platform_lookup TYPE: sets P_TYPE P_HOST P_SSH_USER P_KEY_TYPE P_SETTINGS_URL P_GREETING.
+platform_lookup() {
+  local want=$1 type="" host="" sshuser="" keytype="" url="" greeting=""
+  [ -f "$PLATFORMS_TSV" ] || die "missing platform table: $PLATFORMS_TSV"
+  while IFS=$'\t' read -r type host sshuser keytype url greeting; do
+    case $type in ''|'#'*) continue ;; esac
+    if [ "$type" = "$want" ]; then
+      P_TYPE=$type; P_HOST=$host; P_SSH_USER=$sshuser; P_KEY_TYPE=$keytype
+      P_SETTINGS_URL=$url; P_GREETING=$greeting
+      return 0
+    fi
+  done < "$PLATFORMS_TSV"
+  return 1
+}
+
+platform_types() {
+  local type="" _rest=""
+  [ -f "$PLATFORMS_TSV" ] || die "missing platform table: $PLATFORMS_TSV"
+  # shellcheck disable=SC2034
+  while IFS=$'\t' read -r type _rest; do
+    case $type in ''|'#'*) continue ;; esac
+    printf '%s\n' "$type"
+  done < "$PLATFORMS_TSV"
+}
+
+choose_platform() {
+  local types=() t="" i=0 reply=""
+  while IFS= read -r t; do types+=("$t"); done < <(platform_types)
+  [ ${#types[@]} -gt 0 ] || die "the platform table is empty"
+  say "Platform type:"
+  for t in "${types[@]}"; do
+    i=$((i + 1))
+    printf '  %d) %s\n' "$i" "$t"
+  done
+  while :; do
+    prompt_line reply "Choose a number or a name" "1"
+    case $reply in
+      *[!0-9]*)
+        platform_lookup "$reply" && return 0
+        ;;
+      *)
+        if [ "$reply" -ge 1 ] && [ "$reply" -le "${#types[@]}" ]; then
+          platform_lookup "${types[$((reply - 1))]}" && return 0
+        fi
+        ;;
+    esac
+    say "Not a valid choice."
+  done
+}
+
+# ---------------------------------------------------------------- accounts
+
+account_config() { printf '%s/%s/%s.gitconfig\n' "$ACCOUNTS_DIR" "$1" "$2"; }
+account_dir() { printf '%s/%s/%s\n' "$ROOT" "$1" "$2"; }
+key_path() { printf '%s/%s_%s\n' "$KEY_DIR" "$1" "$2"; }
+account_exists() { [ -d "$(account_dir "$1" "$2")" ] && [ -f "$(account_config "$1" "$2")" ]; }
+cfg_get() { git config -f "$1" --get "$2" 2>/dev/null; }
+cfg_set() { git config -f "$1" "$2" "$3" || die "cannot write $1"; }
+
+# all_accounts: one "platform-dir username" line per account config, sorted.
+all_accounts() {
+  local f="" dir="" user=""
+  [ -d "$ACCOUNTS_DIR" ] || return 0
+  find "$ACCOUNTS_DIR" -mindepth 2 -maxdepth 2 -type f -name '*.gitconfig' | sort |
+    while IFS= read -r f; do
+      dir=$(basename "$(dirname "$f")")
+      user=$(basename "$f" .gitconfig)
+      printf '%s %s\n' "$dir" "$user"
+    done
+}
+
+account_count() { all_accounts | wc -l | tr -d ' '; }
+
+# write_gitum_gitconfig: regenerate the gitum-owned gitconfig from the accounts directory.
+write_gitum_gitconfig() {
+  local tmp="" dir="" user=""
+  mkdir -p "$CONFIG_DIR" || die "cannot create $CONFIG_DIR"
+  tmp="$GITUM_GITCONFIG.tmp.$$"
+  {
+    printf '# Managed by gitum. Do not edit: gitum rewrites this file.\n'
+    printf '# Defaults: no identity, no SSH key and no credential helper outside account directories.\n'
+    printf '[user]\n\tuseConfigOnly = true\n'
+    printf '[core]\n\tsshCommand = ssh -o PubkeyAuthentication=no -o IdentityAgent=none\n'
+    printf '[credential]\n\thelper =\n'
+    all_accounts | while read -r dir user; do
+      printf '[includeIf "gitdir/i:%s/%s/%s/"]\n\tpath = %s\n' \
+        "$ROOT" "$dir" "$user" "$(display_path "$(account_config "$dir" "$user")")"
+    done
+  } > "$tmp" || die "cannot write $tmp"
+  mv "$tmp" "$GITUM_GITCONFIG" || die "cannot write $GITUM_GITCONFIG"
+}
+
+# ensure_global_gitconfig: remove the global identity and include the gitum gitconfig.
+ensure_global_gitconfig() {
+  local include_path="" name="" email="" found="" backup="" rules="" xdg_git=""
+  include_path=$(display_path "$GITUM_GITCONFIG")
+  if [ -f "$GLOBAL_GITCONFIG" ]; then
+    name=$(cfg_get "$GLOBAL_GITCONFIG" user.name)
+    email=$(cfg_get "$GLOBAL_GITCONFIG" user.email)
+    found=$(git config -f "$GLOBAL_GITCONFIG" --get-all include.path 2>/dev/null | grep -Fx -- "$include_path")
+  fi
+  if [ -n "$name" ] || [ -n "$email" ] || [ -z "$found" ]; then
+    if [ -f "$GLOBAL_GITCONFIG" ]; then
+      backup="$GLOBAL_GITCONFIG.gitum-backup-$(date +%Y%m%d%H%M%S)"
+      cp -p "$GLOBAL_GITCONFIG" "$backup" || die "cannot back up $GLOBAL_GITCONFIG"
+      say "Backed up $(display_path "$GLOBAL_GITCONFIG") to $(display_path "$backup")"
+    fi
+    if [ -n "$name" ]; then
+      git config -f "$GLOBAL_GITCONFIG" --unset-all user.name || die "cannot edit $GLOBAL_GITCONFIG"
+      say "Removed user.name ($name) from $(display_path "$GLOBAL_GITCONFIG")"
+    fi
+    if [ -n "$email" ]; then
+      git config -f "$GLOBAL_GITCONFIG" --unset-all user.email || die "cannot edit $GLOBAL_GITCONFIG"
+      say "Removed user.email ($email) from $(display_path "$GLOBAL_GITCONFIG")"
+    fi
+    if [ -z "$found" ]; then
+      if [ -s "$GLOBAL_GITCONFIG" ] && [ -n "$(tail -c 1 "$GLOBAL_GITCONFIG")" ]; then
+        printf '\n' >> "$GLOBAL_GITCONFIG"
+      fi
+      printf '[include] path = %s\n' "$include_path" >> "$GLOBAL_GITCONFIG" || die "cannot edit $GLOBAL_GITCONFIG"
+      say "Appended '[include] path = $include_path' to $(display_path "$GLOBAL_GITCONFIG")"
+    fi
+  fi
+  rules=$(git config -f "$GLOBAL_GITCONFIG" --list 2>/dev/null | grep -i '^includeif\.')
+  if [ -n "$rules" ]; then
+    say "$(display_path "$GLOBAL_GITCONFIG") has includeIf rules of its own. gitum leaves them alone; clean them up by hand:"
+    indent "  " "$rules"
+  fi
+  xdg_git="${XDG_CONFIG_HOME:-$HOME/.config}/git/config"
+  if [ -f "$xdg_git" ] && { [ -n "$(cfg_get "$xdg_git" user.name)" ] || [ -n "$(cfg_get "$xdg_git" user.email)" ]; }; then
+    warn "$(display_path "$xdg_git") also sets user.name or user.email. Remove them by hand, or every repository keeps that identity."
+  fi
+}
+
+report_state() {
+  local n="" inc=no
+  n=$(account_count)
+  if [ -f "$GLOBAL_GITCONFIG" ] &&
+    git config -f "$GLOBAL_GITCONFIG" --get-all include.path 2>/dev/null | grep -qFx -- "$(display_path "$GITUM_GITCONFIG")"; then
+    inc=yes
+  fi
+  say ""
+  say "gitum state"
+  say "  root:      $(display_path "$ROOT")"
+  say "  config:    $(display_path "$CONFIG_DIR")"
+  say "  accounts:  $n"
+  say "  $(display_path "$GLOBAL_GITCONFIG") includes $(display_path "$GITUM_GITCONFIG"): $inc"
+}
+
+# ---------------------------------------------------------------- ssh config overlap
+
+# host_matches HOST PATTERN...: 0 when HOST matches the ssh_config pattern list.
+host_matches() {
+  local host=$1 pat="" matched=1
+  shift
+  for pat in "$@"; do
+    pat=$(lower "$pat")
+    case $pat in
+      '!'*)
+        # shellcheck disable=SC2053
+        [[ $host == ${pat#!} ]] && return 1
+        ;;
+      *)
+        # shellcheck disable=SC2053
+        [[ $host == $pat ]] && matched=0
+        ;;
+    esac
+  done
+  return $matched
+}
+
+# scan_ssh_config FILE HOST DEPTH: warn about IdentityFile and IdentityAgent lines that apply to HOST.
+scan_ssh_config() {
+  local file=$1 host=$2 depth=$3
+  local line="" n=0 key="" rest="" lkey="" lrest="" pats="" g="" inc="" applies=1
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line=${line#"${line%%[![:space:]]*}"}
+    case $line in ''|'#'*) continue ;; esac
+    key=${line%%[[:space:]=]*}
+    rest=${line#"$key"}
+    rest=${rest#"${rest%%[![:space:]=]*}"}
+    lkey=$(lower "$key")
+    case $lkey in
+      host)
+        # shellcheck disable=SC2086
+        if host_matches "$host" $rest; then applies=1; else applies=0; fi
+        ;;
+      match)
+        lrest=$(lower "$rest")
+        case $lrest in
+          all) applies=1 ;;
+          host\ *|originalhost\ *)
+            pats=${lrest#* }
+            pats=${pats%% *}
+            # shellcheck disable=SC2086
+            if host_matches "$host" ${pats//,/ }; then applies=1; else applies=0; fi
+            ;;
+          *) applies=0 ;;
+        esac
+        ;;
+      identityfile|identityagent)
+        if [ "$applies" = 1 ]; then
+          warn "$(display_path "$file"):$n applies to $host: $line"
+          SSH_OVERLAP=1
+        fi
+        ;;
+      include)
+        [ "$depth" -lt 5 ] || continue
+        # shellcheck disable=SC2086
+        for g in $rest; do
+          g=$(expand_tilde "$g")
+          case $g in /*) ;; *) g="$HOME/.ssh/$g" ;; esac
+          for inc in $g; do
+            [ -f "$inc" ] && scan_ssh_config "$inc" "$host" $((depth + 1))
+          done
+        done
+        ;;
+    esac
+  done < "$file"
+}
+
+# warn_ssh_overlap HOST: warn when ~/.ssh/config adds keys for HOST.
+warn_ssh_overlap() {
+  local host=""
+  host=$(lower "$1")
+  SSH_OVERLAP=0
+  scan_ssh_config "$SSH_CONFIG" "$host" 0
+  if [ "$SSH_OVERLAP" = 1 ]; then
+    warn "ssh tries the key(s) above after the gitum key. A gitum key that is not registered on $host would then authenticate as whichever account owns that key. Move those lines under a Host alias that git does not use, or remove them."
+  fi
+}
+
+# ---------------------------------------------------------------- guides and clipboard
+
+# copy_to_clipboard FILE: prints the tool used; returns 1 when no clipboard tool worked.
+copy_to_clipboard() {
+  local file=$1
+  if command -v pbcopy >/dev/null 2>&1 && pbcopy < "$file" 2>/dev/null; then say pbcopy; return 0; fi
+  if command -v wl-copy >/dev/null 2>&1 && wl-copy < "$file" 2>/dev/null; then say wl-copy; return 0; fi
+  if command -v xclip >/dev/null 2>&1 && xclip -selection clipboard < "$file" 2>/dev/null; then say xclip; return 0; fi
+  return 1
+}
+
+# print_guide TYPE GENERATED CLIPPED: print resources/guides/TYPE.txt with placeholders filled.
+# Lines tagged @nokey print only when GENERATED is 0; @clip only when CLIPPED is 1; @noclip only when it is 0.
+print_guide() {
+  local type=$1 generated=$2 clipped=$3 file="" line=""
+  file="$GUIDES_DIR/$type.txt"
+  [ -f "$file" ] || file="$GUIDES_DIR/other.txt"
+  [ -f "$file" ] || die "missing guide: $file"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      '@nokey'*) [ "$generated" = 0 ] || continue; line=${line#@nokey}; line=${line# } ;;
+      '@noclip'*) [ "$clipped" = 0 ] || continue; line=${line#@noclip}; line=${line# } ;;
+      '@clip'*) [ "$clipped" = 1 ] || continue; line=${line#@clip}; line=${line# } ;;
+    esac
+    line=${line//'{{SETTINGS_URL}}'/$G_SETTINGS_URL}
+    line=${line//'{{PUBKEY_PATH}}'/$G_PUBKEY_PATH}
+    line=${line//'{{USERNAME}}'/$G_USERNAME}
+    line=${line//'{{HOST}}'/$G_HOST}
+    line=${line//'{{PLATFORM_DIR}}'/$G_PLATFORM_DIR}
+    line=${line//'{{KEYGEN_COMMAND}}'/$G_KEYGEN_COMMAND}
+    printf '%s\n' "$line"
+  done < "$file"
+}
+
+# ---------------------------------------------------------------- remotes
+
+# parse_remote URL: sets R_SCHEME (https|ssh|scp|other), R_HOST and R_PATH.
+parse_remote() {
+  local url=$1 rest=""
+  R_SCHEME=other; R_HOST=""; R_PATH=""
+  case $url in
+    https://*|http://*)
+      R_SCHEME=https
+      rest=${url#*://}
+      case $rest in *@*/*) rest=${rest#*@} ;; esac
+      R_HOST=${rest%%/*}
+      R_PATH=${rest#*/}
+      ;;
+    ssh://*)
+      R_SCHEME=ssh
+      rest=${url#ssh://}
+      case $rest in *@*) rest=${rest#*@} ;; esac
+      R_HOST=${rest%%/*}
+      R_HOST=${R_HOST%%:*}
+      R_PATH=${rest#*/}
+      ;;
+    *://*|/*|./*|../*)
+      R_SCHEME=other
+      ;;
+    *:*)
+      R_SCHEME=scp
+      rest=$url
+      case $rest in *@*) rest=${rest#*@} ;; esac
+      R_HOST=${rest%%:*}
+      R_PATH=${rest#*:}
+      ;;
+  esac
+}
+
+# https_to_ssh TYPE SSHUSER HOST PATH: print the SSH form of an HTTPS clone URL.
+https_to_ssh() {
+  local type=$1 sshuser=$2 host=$3 path=$4
+  if [ "$type" = azure-devops ]; then
+    path=${path%/}
+    path=${path//\/_git\//\/}
+    printf '%s@%s:v3/%s\n' "$sshuser" "$host" "$path"
+  else
+    printf '%s@%s:%s\n' "$sshuser" "$host" "$path"
+  fi
+}
+
+# ---------------------------------------------------------------- init
+
+cmd_init() {
+  local root_arg="" had_config=0 new_root="" reply="" default="" s="" n=0 d="" u="" list=""
+  local missing=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --root)
+        [ $# -ge 2 ] || usage_error "--root needs a path"
+        root_arg=$2
+        shift 2
+        ;;
+      --root=*)
+        root_arg=${1#--root=}
+        shift
+        ;;
+      *) usage_error "unknown init argument: $1" ;;
+    esac
+  done
+  if load_config; then had_config=1; fi
+
+  if [ -n "$root_arg" ]; then
+    new_root=$(abs_path "$root_arg") || die "cannot resolve $root_arg: its parent directory must exist"
+  else
+    say "gitum keeps every account directory under one source root."
+    # shellcheck disable=SC2088
+    if [ "$had_config" = 1 ]; then default=$(display_path "$ROOT"); else default="~/src"; fi
+    prompt_path reply "Source root" "$default"
+    new_root=$(abs_path "$reply") || die "cannot resolve $reply: its parent directory must exist"
+  fi
+
+  if [ "$had_config" = 1 ] && [ "$new_root" != "$ROOT" ]; then
+    n=$(account_count)
+    if [ -n "$root_arg" ]; then
+      [ -d "$new_root" ] || die "$new_root does not exist. Move the tree there first, then run: gitum init --root $(display_path "$new_root")"
+      ROOT=$new_root
+      save_config
+      write_gitum_gitconfig
+      say "Root is now $(display_path "$ROOT"). Rewrote $n includeIf rule(s). No files were moved."
+      all_accounts | while read -r d u; do
+        [ -d "$(account_dir "$d" "$u")" ] || warn "account directory missing: $(account_dir "$d" "$u")"
+      done
+      report_state
+      return 0
+    fi
+    if [ "$n" -gt 0 ]; then
+      die "the root is $(display_path "$ROOT") and $n account(s) live under it. To move it: move the tree by hand, then run: gitum init --root $(display_path "$new_root")"
+    fi
+    had_config=0
+  fi
+
+  if [ ! -d "$new_root" ]; then
+    if confirm "$(display_path "$new_root") does not exist. Create it?" y; then
+      mkdir -p "$new_root" || die "cannot create $new_root"
+      new_root=$(physical_dir "$new_root") || die "cannot enter $new_root"
+    else
+      die "a source root is required"
+    fi
+  fi
+  ROOT=$new_root
+
+  if [ "$had_config" = 0 ]; then
+    for s in $STANDARD_SUBDIRS; do
+      [ -d "$ROOT/$s" ] || missing+=("$s")
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+      list=${missing[*]}
+      if confirm "Create the recommended directories ${list// /, } under $(display_path "$ROOT")?" y; then
+        for s in "${missing[@]}"; do
+          mkdir -p "$ROOT/$s" || die "cannot create $ROOT/$s"
+        done
+        say "Created ${list// /, }."
+      fi
+    fi
+    save_config
+  fi
+
+  ensure_global_gitconfig
+  write_gitum_gitconfig
+  report_state
+  if [ "$(account_count)" = 0 ]; then
+    say ""
+    say "Next: add an account with: gitum add"
+  fi
+}
+
+# ---------------------------------------------------------------- add
+
+cmd_add() {
+  require_init
+  [ $# -le 2 ] || usage_error "add takes at most two arguments: [<type>] [<username>]"
+  local type=${1:-} username=${2:-} dir="" host="" name="" email="" acct_dir="" cfg="" s=""
+  local key="" pub="" comment="" sshcmd="" clash="" tool="" generated=0 clipped=0
+  local keygen=()
+
+  if [ -n "$type" ]; then
+    platform_lookup "$type" || usage_error "unknown platform type '$type'. Known types: $(platform_types | tr '\n' ' ')"
+  else
+    choose_platform
+  fi
+  prompt_line dir "Directory name under $(display_path "$ROOT")" "$P_TYPE"
+  case $dir in ''|.|..|*/*|*[[:space:]]*) die "invalid directory name: $dir" ;; esac
+  if [ "$P_HOST" = "-" ]; then
+    prompt_required host "Host name (for example git.example.com)"
+  else
+    host=$P_HOST
+  fi
+  [ -n "$username" ] || prompt_required username "Username on $host"
+  case $username in .|..|*/*|*[[:space:]]*) die "invalid username: $username" ;; esac
+  prompt_required name "Commit author name"
+  prompt_required email "Commit author email"
+
+  acct_dir=$(account_dir "$dir" "$username")
+  cfg=$(account_config "$dir" "$username")
+  if [ -d "$acct_dir" ] && [ -f "$cfg" ]; then
+    warn "account $dir/$username already exists ($acct_dir)"
+    exit 1
+  fi
+  clash=$(all_accounts | while read -r d u; do
+    [ "$(lower "$d/$u")" = "$(lower "$dir/$username")" ] && printf '%s/%s\n' "$d" "$u"
+  done)
+  [ -z "$clash" ] || die "account $clash differs from $dir/$username only in case; gitum matches directories case-insensitively"
+  [ ! -d "$acct_dir" ] || say "Directory $(display_path "$acct_dir") exists; using it."
+
+  for s in $STANDARD_SUBDIRS; do
+    mkdir -p "$acct_dir/$s" || die "cannot create $acct_dir/$s"
+  done
+
+  key=$(key_path "$dir" "$username")
+  pub="$key.pub"
+  sshcmd="ssh -i $(display_path "$key") -o IdentitiesOnly=yes -o AddKeysToAgent=yes"
+  [ "$(uname -s)" = Darwin ] && sshcmd="$sshcmd -o UseKeychain=yes"
+
+  mkdir -p "$(dirname "$cfg")" || die "cannot create $(dirname "$cfg")"
+  rm -f "${cfg:?}"
+  cfg_set "$cfg" user.name "$name"
+  cfg_set "$cfg" user.email "$email"
+  cfg_set "$cfg" core.sshCommand "$sshcmd"
+  cfg_set "$cfg" "url.$P_SSH_USER@$host:.insteadOf" "https://$host/"
+  cfg_set "$cfg" gitum.type "$P_TYPE"
+  cfg_set "$cfg" gitum.host "$host"
+  cfg_set "$cfg" gitum.dir "$dir"
+  cfg_set "$cfg" gitum.user "$username"
+  cfg_set "$cfg" gitum.key "$(display_path "$key")"
+  write_gitum_gitconfig
+  say "Added account $dir/$username"
+  say "  directory: $(display_path "$acct_dir")"
+  say "  config:    $(display_path "$cfg")"
+  say ""
+
+  comment="$username@$dir (gitum)"
+  keygen=(ssh-keygen -t "$P_KEY_TYPE")
+  [ "$P_KEY_TYPE" = rsa ] && keygen+=(-b 4096)
+  keygen+=(-f "$key" -C "$comment")
+  G_KEYGEN_COMMAND="ssh-keygen -t $P_KEY_TYPE"
+  [ "$P_KEY_TYPE" = rsa ] && G_KEYGEN_COMMAND="$G_KEYGEN_COMMAND -b 4096"
+  G_KEYGEN_COMMAND="$G_KEYGEN_COMMAND -f $(display_path "$key") -C \"$comment\""
+
+  if [ -f "$key" ]; then
+    say "Key $(display_path "$key") exists; not generating a new one."
+    generated=1
+  elif confirm "Generate the SSH key now? ssh-keygen asks for an optional passphrase." y; then
+    if [ ! -d "$HOME/.ssh" ]; then
+      mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+    fi
+    if ! mkdir -p "$KEY_DIR" || ! chmod 700 "$KEY_DIR"; then
+      die "cannot create $KEY_DIR"
+    fi
+    if "${keygen[@]}"; then
+      generated=1
+    else
+      warn "ssh-keygen failed; generate the key by hand with the command below"
+    fi
+  fi
+  if [ -f "$pub" ]; then
+    if tool=$(copy_to_clipboard "$pub"); then
+      clipped=1
+      say "Copied $(display_path "$pub") to the clipboard with $tool."
+    fi
+  fi
+
+  G_SETTINGS_URL=$P_SETTINGS_URL
+  G_PUBKEY_PATH=$(display_path "$pub")
+  G_USERNAME=$username
+  G_HOST=$host
+  G_PLATFORM_DIR=$dir
+  say ""
+  print_guide "$P_TYPE" "$generated" "$clipped"
+  say ""
+  warn_ssh_overlap "$host"
+
+  if [ -f "$key" ]; then
+    if confirm "Run the connection test now?" y; then
+      test_account "$dir" "$username"
+    fi
+  else
+    say "After you generate and register the key, run: gitum test $dir $username"
+  fi
+}
+
+# ---------------------------------------------------------------- test
+
+# test_account PLATFORM-DIR USERNAME: run ssh with the account's options; 0 on pass.
+test_account() {
+  local dir=$1 user=$2 cfg="" type="" host="" sshcmd="" key="" out="" rc=0 pattern="" w=""
+  local words=() args=()
+  cfg=$(account_config "$dir" "$user")
+  [ -f "$cfg" ] || { warn "no such account: $dir/$user"; return 1; }
+  type=$(cfg_get "$cfg" gitum.type)
+  host=$(cfg_get "$cfg" gitum.host)
+  key=$(cfg_get "$cfg" gitum.key)
+  sshcmd=$(cfg_get "$cfg" core.sshCommand)
+  [ -n "$sshcmd" ] || { warn "$dir/$user: no core.sshCommand in $cfg"; return 1; }
+  if ! platform_lookup "$type"; then
+    P_SSH_USER=git
+    P_GREETING="-"
+  fi
+  [ -f "$(expand_tilde "$key")" ] || warn "$dir/$user: key file $key is missing"
+  warn_ssh_overlap "$host"
+
+  read -ra words <<< "$sshcmd"
+  for w in "${words[@]}"; do
+    args+=("$(expand_tilde "$w")")
+  done
+  say "$dir/$user: ssh -T $P_SSH_USER@$host with key $key"
+  out=$("${args[@]}" -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -T "$P_SSH_USER@$host" 2>&1)
+  rc=$?
+  [ -z "$out" ] || indent "  | " "$out"
+
+  if printf '%s\n' "$out" | grep -q 'Permission denied'; then
+    say "$dir/$user: FAIL - $host did not accept the key $key. Register the public key for $user, then run the test again."
+    return 1
+  fi
+  if [ "$P_GREETING" != "-" ]; then
+    pattern=${P_GREETING//'{{USERNAME}}'/$user}
+    if printf '%s\n' "$out" | grep -qF -- "$pattern"; then
+      say "$dir/$user: PASS"
+      return 0
+    fi
+    if [ "$rc" -eq 255 ]; then
+      say "$dir/$user: FAIL - could not connect to $host (ssh exit status 255)"
+      return 1
+    fi
+    say "$dir/$user: FAIL - $host accepted a key, but the greeting does not name $user. Check which account the key is registered to."
+    return 1
+  fi
+  if [ "$rc" -eq 255 ]; then
+    say "$dir/$user: FAIL - could not connect to $host (ssh exit status 255)"
+    return 1
+  fi
+  say "$dir/$user: PASS"
+  return 0
+}
+
+cmd_test() {
+  require_init
+  local fails=0 n=0 dir="" user=""
+  case $# in
+    0)
+      while read -r dir user; do
+        n=$((n + 1))
+        test_account "$dir" "$user" || fails=$((fails + 1))
+      done < <(all_accounts)
+      if [ "$n" -eq 0 ]; then
+        say "No accounts to test. Add one with: gitum add"
+        return 0
+      fi
+      say "$((n - fails)) of $n account(s) passed."
+      ;;
+    2)
+      test_account "$1" "$2" || fails=1
+      ;;
+    *) usage_error "test takes no arguments, or exactly two: <platform> <username>" ;;
+  esac
+  [ "$fails" -eq 0 ]
+}
+
+# ---------------------------------------------------------------- list
+
+cmd_list() {
+  require_init
+  [ $# -le 1 ] || usage_error "list takes at most one argument: [<platform>]"
+  local filter=${1:-} dir="" user="" cfg="" name="" email="" key="" marker="" n=0 last=""
+  while read -r dir user; do
+    [ -z "$filter" ] || [ "$dir" = "$filter" ] || continue
+    n=$((n + 1))
+    if [ -n "$last" ] && [ "$dir" != "$last" ]; then say ""; fi
+    last=$dir
+    cfg=$(account_config "$dir" "$user")
+    name=$(cfg_get "$cfg" user.name)
+    email=$(cfg_get "$cfg" user.email)
+    key=$(cfg_get "$cfg" gitum.key)
+    marker=""
+    [ -f "$(expand_tilde "$key")" ] || marker="  (key missing)"
+    [ -d "$(account_dir "$dir" "$user")" ] || marker="$marker  (directory missing)"
+    printf '%-24s %-40s %s%s\n' "$dir/$user" "$name <$email>" "$key" "$marker"
+  done < <(all_accounts)
+  if [ "$n" -eq 0 ]; then
+    if [ -n "$filter" ]; then
+      say "No accounts under $filter."
+    else
+      say "No accounts. Add one with: gitum add"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------- search
+
+# filter_terms TERM...: keep stdin lines that contain every term, case-insensitively.
+filter_terms() {
+  local t=""
+  if [ $# -eq 0 ]; then
+    cat
+  else
+    t=$1
+    shift
+    grep -iF -- "$t" | filter_terms "$@"
+  fi
+}
+
+cmd_search() {
+  require_init
+  [ $# -ge 1 ] || usage_error "search needs at least one term"
+  local p="" rel=""
+  find "$ROOT" -mindepth 1 -type d \( -exec test -e '{}/.git' \; \) -prune -print 2>/dev/null |
+    while IFS= read -r p; do
+      printf '%s\n' "${p#"$ROOT"/}"
+    done |
+    filter_terms "$@" |
+    sort |
+    while IFS= read -r rel; do
+      printf '%s/%s\n' "$ROOT" "$rel"
+    done
+}
+
+# ---------------------------------------------------------------- adopt
+
+# adopt_one PATH: move one repository into the account held in the A_* variables.
+adopt_one() {
+  local path=$1 abs="" origin="" newurl="" owner="" suggest="" sub="" dest="" s="" https_host=""
+  local subs=()
+  abs=$(abs_path "$path") || { warn "no such directory: $path"; return 1; }
+  if [ ! -d "$abs" ] || [ ! -e "$abs/.git" ]; then
+    warn "not a git repository: $path"
+    return 1
+  fi
+  say ""
+  say "Repository: $(display_path "$abs")"
+  origin=$(git -C "$abs" remote get-url origin 2>/dev/null) || origin=""
+  if [ -z "$origin" ]; then
+    say "  origin: (none)"
+  else
+    say "  origin: $origin"
+    parse_remote "$origin"
+    https_host=$A_HOST
+    [ "$A_TYPE" = azure-devops ] && https_host=dev.azure.com
+    case $R_SCHEME in
+      https)
+        if [ "$(lower "$R_HOST")" = "$(lower "$https_host")" ]; then
+          newurl=$(https_to_ssh "$A_TYPE" "$A_SSH_USER" "$A_HOST" "$R_PATH")
+          say "  HTTPS remotes no longer authenticate under gitum."
+          if confirm "  Convert origin to $newurl?" y; then
+            git -C "$abs" remote set-url origin "$newurl" || { warn "cannot change the origin remote"; return 1; }
+            say "  origin is now $newurl"
+          fi
+        else
+          warn "origin host $R_HOST is not the account host $https_host; left unchanged"
+        fi
+        ;;
+      ssh|scp)
+        if [ "$(lower "$R_HOST")" != "$(lower "$A_HOST")" ]; then
+          newurl="$A_SSH_USER@$A_HOST:$R_PATH"
+          say "  origin host $R_HOST differs from the account host $A_HOST."
+          if confirm "  Rewrite origin to $newurl?" y; then
+            git -C "$abs" remote set-url origin "$newurl" || { warn "cannot change the origin remote"; return 1; }
+            say "  origin is now $newurl"
+          fi
+        fi
+        ;;
+      *)
+        say "  origin left unchanged"
+        ;;
+    esac
+    owner=$R_PATH
+    [ "$A_TYPE" = azure-devops ] && owner=${owner#v3/}
+    owner=${owner%%/*}
+  fi
+
+  if [ -n "$owner" ] && [ "$(lower "$owner")" = "$(lower "$A_USER")" ]; then
+    suggest=my
+  else
+    suggest=contrib
+  fi
+  for s in "$A_DIR"/*/; do
+    [ -d "$s" ] || continue
+    s=${s%/}
+    subs+=("${s##*/}")
+  done
+  [ ${#subs[@]} -gt 0 ] || { warn "no subdirectories under $A_DIR"; return 1; }
+  case " ${subs[*]} " in
+    *" $suggest "*) ;;
+    *) suggest=${subs[0]} ;;
+  esac
+  say "  Subdirectories of $(display_path "$A_DIR"): ${subs[*]}"
+  while :; do
+    prompt_line sub "  Destination subdirectory" "$suggest"
+    case " ${subs[*]} " in
+      *" $sub "*) break ;;
+    esac
+    say "  Choose one of: ${subs[*]}"
+  done
+  dest="$A_DIR/$sub/$(basename "$abs")"
+  if [ -e "$dest" ]; then
+    warn "destination exists: $dest"
+    return 1
+  fi
+  if confirm "  Move $(display_path "$abs") to $(display_path "$dest")?" y; then
+    mv "$abs" "$dest" || { warn "cannot move $abs to $dest"; return 1; }
+    say "  Moved to $(display_path "$dest")"
+  else
+    say "  Not moved."
+  fi
+  return 0
+}
+
+cmd_adopt() {
+  require_init
+  [ $# -ge 3 ] || usage_error "adopt needs <platform> <username> <path>..."
+  local dir=$1 user=$2 cfg="" p="" fails=0
+  shift 2
+  account_exists "$dir" "$user" || die "no such account: $dir/$user"
+  cfg=$(account_config "$dir" "$user")
+  A_DIR=$(account_dir "$dir" "$user")
+  A_USER=$user
+  A_TYPE=$(cfg_get "$cfg" gitum.type)
+  A_HOST=$(cfg_get "$cfg" gitum.host)
+  if platform_lookup "$A_TYPE"; then A_SSH_USER=$P_SSH_USER; else A_SSH_USER=git; fi
+  for p in "$@"; do
+    adopt_one "$p" || fails=$((fails + 1))
+  done
+  [ "$fails" -eq 0 ]
+}
+
+# ---------------------------------------------------------------- delete
+
+cmd_delete() {
+  require_init
+  [ $# -eq 2 ] || usage_error "delete needs <platform> <username>"
+  local dir=$1 user=$2 cfg="" acct_dir="" key="" host="" blockers="" others="" b=""
+  cfg=$(account_config "$dir" "$user")
+  acct_dir=$(account_dir "$dir" "$user")
+  if [ ! -f "$cfg" ] && [ ! -d "$acct_dir" ]; then
+    die "no such account: $dir/$user"
+  fi
+  if [ -d "$acct_dir" ]; then
+    blockers=$(find "$acct_dir" -mindepth 1 \( -type d -exec test -e '{}/.git' \; -prune -print \) -o \( ! -type d -print \) 2>/dev/null | sort | head -n 20)
+    if [ -n "$blockers" ]; then
+      warn "$(display_path "$acct_dir") is not empty. Move or delete these first (repositories and files, at most 20 shown):"
+      while IFS= read -r b; do printf '  %s\n' "${b#"$acct_dir"/}" >&2; done <<< "$blockers"
+      exit 1
+    fi
+  fi
+  key=$(expand_tilde "$(cfg_get "$cfg" gitum.key)")
+  host=$(cfg_get "$cfg" gitum.host)
+  [ -n "$key" ] || key=$(key_path "$dir" "$user")
+
+  confirm "Delete account $dir/$user?" n || { say "Nothing deleted."; return 0; }
+
+  rm -f "${cfg:?}"
+  rmdir "$(dirname "${cfg:?}")" 2>/dev/null
+  write_gitum_gitconfig
+  if [ -d "$acct_dir" ]; then
+    find "${acct_dir:?}" -depth -type d -exec rmdir {} \;
+    [ ! -d "$acct_dir" ] || warn "could not remove $acct_dir completely"
+  fi
+  others=$(all_accounts | grep -c "^$dir ")
+  if [ "$others" = 0 ] && [ -d "$ROOT/$dir" ] && rmdir "${ROOT:?}/${dir:?}" 2>/dev/null; then
+    say "Removed the now-empty platform directory $(display_path "$ROOT/$dir")"
+  fi
+  say "Removed account $dir/$user"
+
+  if [ -f "$key" ] || [ -f "$key.pub" ]; then
+    if confirm "Delete the key pair too?" n; then
+      rm -f "${key:?}" "${key:?}.pub"
+      say "Deleted $(display_path "$key") and $(display_path "$key.pub")"
+    else
+      say "Kept the key pair:"
+      say "  $(display_path "$key")"
+      say "  $(display_path "$key.pub")"
+    fi
+    [ -z "$host" ] || say "The public key stays registered on $host until you remove it there."
+  fi
+}
+
+# ---------------------------------------------------------------- main
+
+main() {
+  command -v git >/dev/null 2>&1 || die "git is required"
+  [ $# -gt 0 ] || { usage; exit 0; }
+  local cmd=$1
+  shift
+  case $cmd in
+    init) cmd_init "$@" ;;
+    add) cmd_add "$@" ;;
+    test) cmd_test "$@" ;;
+    list) cmd_list "$@" ;;
+    search) cmd_search "$@" ;;
+    adopt) cmd_adopt "$@" ;;
+    delete) cmd_delete "$@" ;;
+    help|-h|--help) usage ;;
+    --version|version) say "$VERSION" ;;
+    *) usage_error "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"

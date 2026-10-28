@@ -1,0 +1,14 @@
+@nokey Generate the key. ssh-keygen asks for an optional passphrase:
+@nokey   {{KEYGEN_COMMAND}}
+@clip The public key is on the clipboard.
+@noclip Copy the public key:
+@noclip   cat {{PUBKEY_PATH}}
+Register the key on Bitbucket as {{USERNAME}}:
+  1. Open {{SETTINGS_URL}} and sign in as {{USERNAME}}.
+     (Settings cog > Personal Bitbucket settings > Security > SSH keys)
+  2. Click "Add key".
+  3. Label: a name for this machine, for example "gitum {{PLATFORM_DIR}}".
+  4. Key: paste the public key.
+  5. Expiry: "No expiry", or a date. The default is 365 days.
+  6. Click "Add key".
+Then run: gitum test {{PLATFORM_DIR}} {{USERNAME}}

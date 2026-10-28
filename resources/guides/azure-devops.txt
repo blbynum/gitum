@@ -1,0 +1,14 @@
+@nokey Generate the key. Azure DevOps accepts RSA keys only. ssh-keygen asks for an optional passphrase:
+@nokey   {{KEYGEN_COMMAND}}
+@clip The public key is on the clipboard.
+@noclip Copy the public key:
+@noclip   cat {{PUBKEY_PATH}}
+Register the key on Azure DevOps as {{USERNAME}}:
+  1. Open {{SETTINGS_URL}} and sign in as {{USERNAME}}.
+     (Avatar menu > "SSH public keys")
+  2. Click "+ New Key".
+  3. Name: a name for this machine, for example "gitum {{PLATFORM_DIR}}".
+  4. Public Key Data: paste the public key with no added line breaks.
+  5. Click "Save". Note the server fingerprint on the page: ssh shows it on the first connection.
+Clone with the SSH URL from the Clone dialog (git@ssh.dev.azure.com:v3/...). gitum does not rewrite Azure HTTPS URLs.
+Then run: gitum test {{PLATFORM_DIR}} {{USERNAME}}

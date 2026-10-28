@@ -1,0 +1,13 @@
+@nokey Generate the key. ssh-keygen asks for an optional passphrase:
+@nokey   {{KEYGEN_COMMAND}}
+@clip The public key is on the clipboard.
+@noclip Copy the public key:
+@noclip   cat {{PUBKEY_PATH}}
+Register the key on GitHub as {{USERNAME}}:
+  1. Open {{SETTINGS_URL}} and sign in as {{USERNAME}}.
+  2. Click "New SSH key".
+  3. Title: a name for this machine, for example "gitum {{PLATFORM_DIR}}".
+  4. Key type: "Authentication Key".
+  5. Key: paste the public key.
+  6. Click "Add SSH key". Confirm access if GitHub asks.
+Then run: gitum test {{PLATFORM_DIR}} {{USERNAME}}
