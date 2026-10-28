@@ -90,6 +90,8 @@ EOF
 
 # ---------------------------------------------------------------- paths
 
+# expand_tilde PATH: PATH with a leading ~ replaced by the home directory.
+# shellcheck disable=SC2088
 expand_tilde() {
   case $1 in
     '~') printf '%s\n' "$HOME" ;;
@@ -120,6 +122,7 @@ abs_path() {
 }
 
 # display_path PATH: PATH with the home directory shown as ~.
+# shellcheck disable=SC2088
 display_path() {
   case $1 in
     "$HOME") printf '~\n' ;;
@@ -376,6 +379,8 @@ host_matches() {
 }
 
 # scan_ssh_config FILE HOST DEPTH: warn about IdentityFile and IdentityAgent lines that apply to HOST.
+# SC2094: display_path only formats the file name; nothing writes to FILE.
+# shellcheck disable=SC2094
 scan_ssh_config() {
   local file=$1 host=$2 depth=$3
   local line="" n=0 key="" rest="" lkey="" lrest="" pats="" g="" inc="" applies=1
