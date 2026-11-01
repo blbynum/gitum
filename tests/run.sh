@@ -69,7 +69,9 @@ mkdir -p "$stub"
 cat > "$stub/ssh-keygen" <<EOF
 #!/usr/bin/env bash
 # test stub: record the arguments gitum passes, then generate with an empty passphrase
+# (or fail when STUB_KEYGEN_FAIL is set)
 printf '%s\n' "\$@" > "$tmp/keygen.args"
+[ -z "\${STUB_KEYGEN_FAIL:-}" ] || exit 1
 exec "$real_keygen" "\$@" -N ''
 EOF
 cat > "$stub/pbcopy" <<EOF
@@ -478,6 +480,90 @@ eq "init re-run after the move exits 0" "$rc" 0
 contains "reports the new root" "$out" "root:      ~/code"
 out=$(gitum init --bogus 2>&1); rc=$?
 eq "init with an unknown option exits 2" "$rc" 2
+
+# ---------------------------------------------------------------- update
+
+section "update one field"
+contains "help lists update" "$(gitum help)" "update <platform> <username> [<field>]"
+apub="$HOME/.ssh/gitum/github_alice.pub"
+oldpub=$(cat "$apub")
+out=$(printf 'Alice Renamed\nn\n' | gitum update github alice name 2>&1); rc=$?
+eq "declined update exits 0" "$rc" 0
+contains "name prompt shows the current value" "$out" "Commit author name [Alice Example]:"
+contains "change listed" "$out" "author name:  Alice Example -> Alice Renamed"
+contains "update warns" "$out" "gitum: warning: the new values replace the current ones."
+contains "confirmation defaults to no" "$out" "Apply these changes? [y/N]"
+contains "declined update says so" "$out" "Nothing changed."
+eq "name kept after decline" "$(git config -f "$acfg" --get user.name)" "Alice Example"
+lacks "name update skips the email prompt" "$out" "Commit author email"
+lacks "name update skips the key prompt" "$out" "SSH key"
+out=$(printf '\n' | gitum update github alice name 2>&1); rc=$?
+eq "unchanged update exits 0" "$rc" 0
+contains "unchanged update says so" "$out" "No changes to github/alice."
+lacks "unchanged update asks no confirmation" "$out" "Apply these changes?"
+out=$(printf 'Alice Renamed\ny\n' | gitum update github alice name 2>&1); rc=$?
+eq "name update exits 0" "$rc" 0
+eq "name replaced" "$(git config -f "$acfg" --get user.name)" "Alice Renamed"
+eq "email untouched" "$(git config -f "$acfg" --get user.email)" "alice@example.com"
+eq "identity follows the update" "$(git -C "$newroot/github/alice/my/aliceproj" config user.name)" "Alice Renamed"
+eq "key untouched by a name update" "$(cat "$apub")" "$oldpub"
+out=$(printf 'alice@new.example.com\ny\n' | gitum update github alice email 2>&1); rc=$?
+eq "email update exits 0" "$rc" 0
+eq "email replaced" "$(git config -f "$acfg" --get user.email)" "alice@new.example.com"
+
+section "update key"
+out=$(printf 'n\n' | gitum update github alice key 2>&1); rc=$?
+eq "declined key update exits 0" "$rc" 0
+contains "key replacement warns" "$out" "gitum deletes the old key pair. SSH access to github.com as alice fails"
+eq "key kept after decline" "$(cat "$apub")" "$oldpub"
+out=$(printf 'y\n' | STUB_KEYGEN_FAIL=1 gitum update github alice key 2>&1); rc=$?
+eq "failed ssh-keygen exits 1" "$rc" 1
+contains "failed ssh-keygen explained" "$out" "the key files are unchanged"
+eq "public key kept after a failed ssh-keygen" "$(cat "$apub")" "$oldpub"
+ok "private key kept after a failed ssh-keygen" test -f "$HOME/.ssh/gitum/github_alice"
+out=$(printf 'y\nn\n' | gitum update github alice key 2>&1); rc=$?
+eq "key update exits 0" "$rc" 0
+lacks "key update skips the name prompt" "$out" "Commit author name"
+args=$(tr '\n' ' ' < "$tmp/keygen.args")
+contains "new key written beside the old one" "$args" "-f $HOME/.ssh/gitum/github_alice.new "
+contains "keygen comment" "$args" "-C alice@github (gitum) "
+newpub=$(cat "$apub")
+ok "public key replaced" test "$newpub" != "$oldpub"
+eq "private key matches the new public key" "$("$real_keygen" -y -f "$HOME/.ssh/gitum/github_alice" | cut -d' ' -f1-2)" "$(cut -d' ' -f1-2 < "$apub")"
+ok "no temporary private key left" test ! -e "$HOME/.ssh/gitum/github_alice.new"
+ok "no temporary public key left" test ! -e "$HOME/.ssh/gitum/github_alice.new.pub"
+eq "gitum.key unchanged" "$(git config -f "$acfg" --get gitum.key)" "~/.ssh/gitum/github_alice"
+contains "replacement announced" "$out" "Replaced the key pair ~/.ssh/gitum/github_alice"
+eq "clipboard holds the new public key" "$(cat "$tmp/clipboard")" "$newpub"
+contains "guide printed" "$out" "Then run: gitum test github alice"
+contains "old key reminder" "$out" "The old public key stays registered on github.com"
+contains "connection test offered" "$out" "Run the connection test now?"
+out=$(printf 'y\nn\n' | gitum update azure-devops dana key 2>&1); rc=$?
+eq "key update without an old key exits 0" "$rc" 0
+lacks "no deletion warning without an old key" "$out" "deletes the old key pair"
+lacks "no old-key reminder without an old key" "$out" "old public key"
+contains "generation announced" "$out" "Generated the key pair ~/.ssh/gitum/azure-devops_dana"
+contains "azure key is rsa" "$(tr '\n' ' ' < "$tmp/keygen.args")" "-t rsa -b 4096 "
+ok "dana private key generated" test -f "$HOME/.ssh/gitum/azure-devops_dana"
+
+section "update every field"
+out=$(printf 'Alice Two\n\nn\ny\n' | gitum update github alice 2>&1); rc=$?
+eq "full update exits 0" "$rc" 0
+contains "full update asks for the email" "$out" "Commit author email [alice@new.example.com]:"
+contains "full update asks about the key" "$out" "Replace the SSH key with a new one? [y/N]"
+eq "full update replaces the name" "$(git config -f "$acfg" --get user.name)" "Alice Two"
+eq "full update keeps the email on Enter" "$(git config -f "$acfg" --get user.email)" "alice@new.example.com"
+eq "full update keeps the key" "$(cat "$apub")" "$newpub"
+lacks "full update without a new key lists no key" "$out" "SSH key:"
+out=$(printf '\n\n\n' | gitum update github alice 2>&1); rc=$?
+eq "Enter at every prompt exits 0" "$rc" 0
+contains "Enter at every prompt changes nothing" "$out" "No changes to github/alice."
+out=$(gitum update github alice bogus 2>&1); rc=$?
+eq "unknown field exits 2" "$rc" 2
+out=$(gitum update github 2>&1); rc=$?
+eq "update with one argument exits 2" "$rc" 2
+out=$(gitum update github nobody 2>&1); rc=$?
+eq "update of an unknown account exits 1" "$rc" 1
 
 # ---------------------------------------------------------------- summary
 

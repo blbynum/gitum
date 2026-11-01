@@ -73,18 +73,20 @@ gitum $VERSION - Git User Manager
 Usage: gitum <command> [arguments]
 
 Commands:
-  init [--root <path>]                   Choose the source root and apply the git config
-  add [<type>] [<username>]              Add an account: directory tree, config, SSH key
-  test [<platform> <username>]           Test SSH authentication for one or all accounts
-  list [<platform>]                      List accounts
-  search <term>...                       Find projects under the root by path
-  adopt <platform> <username> <path>...  Move repositories into an account directory
-  delete <platform> <username>           Remove an account
-  help                                   Show this help
-  --version                              Show the version
+  init [--root <path>]                    Choose the source root and apply the git config
+  add [<type>] [<username>]               Add an account: directory tree, config, SSH key
+  update <platform> <username> [<field>]  Replace the name, email or SSH key of an account
+  test [<platform> <username>]            Test SSH authentication for one or all accounts
+  list [<platform>]                       List accounts
+  search <term>...                        Find projects under the root by path
+  adopt <platform> <username> <path>...   Move repositories into an account directory
+  delete <platform> <username>            Remove an account
+  help                                    Show this help
+  --version                               Show the version
 
 <type> is a platform type from resources/platforms.tsv (github, gitlab, ...).
 <platform> is the platform directory name under the root (github, forgejo, ...).
+<field> is name, email or key. Without it, update asks for all three.
 EOF
 }
 
@@ -685,12 +687,7 @@ cmd_add() {
     say "Key $(display_path "$key") exists; not generating a new one."
     generated=1
   elif confirm "Generate the SSH key now? ssh-keygen asks for an optional passphrase." y; then
-    if [ ! -d "$HOME/.ssh" ]; then
-      mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
-    fi
-    if ! mkdir -p "$KEY_DIR" || ! chmod 700 "$KEY_DIR"; then
-      die "cannot create $KEY_DIR"
-    fi
+    make_key_dir
     if "${keygen[@]}"; then
       generated=1
     else
@@ -720,6 +717,123 @@ cmd_add() {
     fi
   else
     say "After you generate and register the key, run: gitum test $dir $username"
+  fi
+}
+
+# make_key_dir: create ~/.ssh and the gitum key directory, mode 700.
+make_key_dir() {
+  if [ ! -d "$HOME/.ssh" ]; then
+    mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+  fi
+  if ! mkdir -p "$KEY_DIR" || ! chmod 700 "$KEY_DIR"; then
+    die "cannot create $KEY_DIR"
+  fi
+}
+
+# ---------------------------------------------------------------- update
+
+cmd_update() {
+  require_init
+  [ $# -eq 2 ] || [ $# -eq 3 ] || usage_error "update needs <platform> <username> [name|email|key]"
+  local dir=$1 user=$2 field=${3:-} cfg="" type="" host="" key="" pub="" new="" tool=""
+  local old_name="" old_email="" name="" email="" new_key=0 replace=0 clipped=0 changes=""
+  local keygen=()
+  case $field in
+    ''|name|email|key) ;;
+    *) usage_error "unknown field '$field'. Fields: name, email, key" ;;
+  esac
+  cfg=$(account_config "$dir" "$user")
+  [ -f "$cfg" ] || die "no such account: $dir/$user"
+  host=$(cfg_get "$cfg" gitum.host)
+  key=$(expand_tilde "$(cfg_get "$cfg" gitum.key)")
+  [ -n "$key" ] || key=$(key_path "$dir" "$user")
+  pub="$key.pub"
+  if [ -f "$key" ] || [ -f "$pub" ]; then replace=1; fi
+  old_name=$(cfg_get "$cfg" user.name)
+  old_email=$(cfg_get "$cfg" user.email)
+  name=$old_name
+  email=$old_email
+
+  case $field in ''|name) prompt_required name "Commit author name" "$old_name" ;; esac
+  case $field in ''|email) prompt_required email "Commit author email" "$old_email" ;; esac
+  case $field in
+    key) new_key=1 ;;
+    '')
+      if [ "$replace" = 1 ]; then
+        confirm "Replace the SSH key with a new one?" n && new_key=1
+      else
+        confirm "Generate the SSH key now? ssh-keygen asks for an optional passphrase." y && new_key=1
+      fi
+      ;;
+  esac
+
+  [ "$name" = "$old_name" ] || changes="$changes  author name:  $old_name -> $name"$'\n'
+  [ "$email" = "$old_email" ] || changes="$changes  author email: $old_email -> $email"$'\n'
+  if [ "$new_key" = 1 ]; then
+    type=$(cfg_get "$cfg" gitum.type)
+    platform_lookup "$type" || die "unknown platform type '$type' in $(display_path "$cfg")"
+    changes="$changes  SSH key:      new key pair at $(display_path "$key")"$'\n'
+  fi
+  if [ -z "$changes" ]; then
+    say "No changes to $dir/$user."
+    return 0
+  fi
+  say ""
+  say "Changes to $dir/$user:"
+  printf '%s' "$changes"
+  if [ "$name" != "$old_name" ] || [ "$email" != "$old_email" ]; then
+    warn "the new values replace the current ones. Commits you already made keep their author."
+  fi
+  if [ "$new_key" = 1 ] && [ "$replace" = 1 ]; then
+    warn "gitum deletes the old key pair. SSH access to $host as $user fails until you register the new public key."
+  fi
+  confirm "Apply these changes?" n || { say "Nothing changed."; return 0; }
+
+  if [ "$name" != "$old_name" ] || [ "$email" != "$old_email" ]; then
+    cfg_set "$cfg" user.name "$name"
+    cfg_set "$cfg" user.email "$email"
+    say "Updated $(display_path "$cfg")"
+  fi
+  [ "$new_key" = 1 ] || return 0
+
+  # ssh-keygen writes beside the old pair, so a failed or cancelled run leaves the old pair intact.
+  new="$key.new"
+  keygen=(ssh-keygen -t "$P_KEY_TYPE")
+  [ "$P_KEY_TYPE" = rsa ] && keygen+=(-b 4096)
+  keygen+=(-f "$new" -C "$user@$dir (gitum)")
+  make_key_dir
+  rm -f "${new:?}" "${new:?}.pub"
+  if ! "${keygen[@]}"; then
+    rm -f "${new:?}" "${new:?}.pub"
+    warn "ssh-keygen failed; the key files are unchanged"
+    return 1
+  fi
+  if ! mv -f "$new" "$key" || ! mv -f "$new.pub" "$pub"; then
+    die "cannot move the new key pair to $(display_path "$key")"
+  fi
+  if [ "$replace" = 1 ]; then
+    say "Replaced the key pair $(display_path "$key")"
+  else
+    say "Generated the key pair $(display_path "$key")"
+  fi
+  if [ -f "$pub" ] && tool=$(copy_to_clipboard "$pub"); then
+    clipped=1
+    say "Copied $(display_path "$pub") to the clipboard with $tool."
+  fi
+
+  G_SETTINGS_URL=$P_SETTINGS_URL
+  G_PUBKEY_PATH=$(display_path "$pub")
+  G_USERNAME=$user
+  G_HOST=$host
+  G_PLATFORM_DIR=$dir
+  say ""
+  print_guide "$P_TYPE" 1 "$clipped"
+  [ "$replace" = 0 ] || say "The old public key stays registered on $host until you remove it there."
+  say ""
+  warn_ssh_overlap "$host"
+
+  if confirm "Run the connection test now?" y; then
+    test_account "$dir" "$user"
   fi
 }
 
@@ -1027,6 +1141,7 @@ main() {
   case $cmd in
     init) cmd_init "$@" ;;
     add) cmd_add "$@" ;;
+    update) cmd_update "$@" ;;
     test) cmd_test "$@" ;;
     list) cmd_list "$@" ;;
     search) cmd_search "$@" ;;

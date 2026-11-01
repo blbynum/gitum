@@ -171,6 +171,35 @@ Run it again with a different root while accounts exist and it refuses. To move 
 
 Adds an account, as described under "Add an account". If the account's directory tree and config both exist, it warns and stops. If only the directory tree exists, it continues and uses it.
 
+### gitum update <platform> <username> [name|email|key]
+
+Replaces the commit author name, the commit author email or the SSH key of an account. Without a field, gitum asks for all three, as `gitum add` does. Each prompt shows the current value; press Enter to keep it. The key prompt defaults to no when a key exists. With a field, gitum asks only for that one:
+
+```bash
+gitum update github blbynum key
+```
+
+```text
+Changes to github/blbynum:
+  SSH key:      new key pair at ~/.ssh/gitum/github_blbynum
+gitum: warning: gitum deletes the old key pair. SSH access to github.com as blbynum fails until you register the new public key.
+Apply these changes? [y/N] y
+Generating public/private ed25519 key pair.
+...
+Replaced the key pair ~/.ssh/gitum/github_blbynum
+Copied ~/.ssh/gitum/github_blbynum.pub to the clipboard with pbcopy.
+
+The public key is on the clipboard.
+Register the key on GitHub as blbynum:
+...
+Then run: gitum test github blbynum
+The old public key stays registered on github.com until you remove it there.
+
+Run the connection test now? [Y/n]
+```
+
+gitum lists the changes, warns, and asks for one confirmation, default no. The new values replace the old ones. Commits you already made keep their author. ssh-keygen writes the new key pair beside the old one, and gitum moves it into place only when ssh-keygen succeeds. A failed or cancelled ssh-keygen leaves the old key pair as it was. After the test passes, remove the old public key from the platform.
+
 ### gitum test [<platform> <username>]
 
 Runs `ssh -T` against the account's host with the account's key and options. With no arguments it tests every account. Pass means that the server accepted the key. gitum prints the server greeting and, where the platform table has a greeting pattern, checks that the greeting names the username, so a key registered to the wrong account is reported. Azure DevOps answers that shell access is unsupported, so there the pass is authentication alone.
@@ -266,14 +295,14 @@ Move those entries under a `Host` alias that git does not use, or remove them.
 
 ## Platforms
 
-`resources/platforms.tsv` has one row per type: type, host, ssh user, key type, settings URL and greeting pattern. `resources/guides/<type>.txt` is the registration guide that `gitum add` prints, at most 15 lines so that it fits a small terminal window. To add a platform, add one row and one guide.
+`resources/platforms.tsv` has one row per type: type, host, ssh user, key type, settings URL and greeting pattern. `resources/guides/<type>.txt` is the registration guide that `gitum add` and `gitum update` print, at most 15 lines so that it fits a small terminal window. To add a platform, add one row and one guide.
 
 ## Limits in 0.1.0
 
 - Commit signing is not configured.
 - The `gh` and `glab` CLIs use their own active account regardless of directory; gitum does not scope them.
 - Keys are not uploaded through platform APIs; the guide shows the web steps.
-- `gitum add` is interactive; it has no non-interactive flags.
+- `gitum add` and `gitum update` are interactive; they have no non-interactive flags.
 - An Azure DevOps HTTPS URL (`https://dev.azure.com/<org>/<project>/_git/<repo>`) is not rewritten by the account's URL rule. Clone with the SSH URL from the Clone dialog. `gitum adopt` converts such URLs.
 
 ## Tests
