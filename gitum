@@ -841,6 +841,8 @@ cmd_update() {
 
 # test_account PLATFORM-DIR USERNAME: run ssh with the account's options; 0 on pass.
 # ssh runs with -v so that the test can read which key the server accepted.
+# ssh reads stdin from /dev/null so that it does not consume the account list of cmd_test.
+# Passphrase and host-key prompts read /dev/tty, not stdin.
 test_account() {
   local dir=$1 user=$2 cfg="" type="" host="" sshcmd="" key="" keyfile="" out="" shown="" accepted=""
   local rc=0 pattern="" w=""
@@ -866,7 +868,7 @@ test_account() {
   done
   say "$dir/$user: ssh -T $P_SSH_USER@$host with key $key"
   out=$("${args[@]}" -v -o ControlPath=none -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no \
-    -T "$P_SSH_USER@$host" 2>&1)
+    -T "$P_SSH_USER@$host" 2>&1 < /dev/null)
   rc=$?
   shown=$(printf '%s\n' "$out" | grep -vE '^(debug[0-9]: |OpenSSH_|Authenticated to |Transferred: |Bytes per second: )')
   [ -z "$shown" ] || indent "  | " "$shown"
