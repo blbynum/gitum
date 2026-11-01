@@ -1001,10 +1001,56 @@ cmd_search() {
 
 # ---------------------------------------------------------------- adopt
 
+# linked_worktrees REPO: the linked worktrees of the repository at REPO that
+# exist on disk, one path per line. The main worktree is not included.
+linked_worktrees() {
+  local line="" first=1
+  [ -d "$1/.git" ] || return 0
+  while IFS= read -r line; do
+    case $line in
+      "worktree "*)
+        # git lists the main worktree first
+        if [ "$first" = 1 ]; then first=0; continue; fi
+        [ -d "${line#worktree }" ] && printf '%s\n' "${line#worktree }"
+        ;;
+    esac
+  done < <(git -C "$1" worktree list --porcelain 2>/dev/null)
+  return 0
+}
+
+# repair_worktrees OLD NEW WORKTREE...: after a move of the repository at OLD
+# to NEW, repair the links between it and the given linked worktrees. Each
+# side holds the absolute path of the other. Worktrees inside OLD moved too.
+repair_worktrees() {
+  local old=$1 new=$2 wt="" out="" rc=0
+  local moved=() all=()
+  shift 2
+  for wt in "$@"; do
+    case $wt in
+      "$old"/*) wt="$new/${wt#"$old"/}"; moved+=("$wt") ;;
+    esac
+    all+=("$wt")
+  done
+  if ! out=$(git -C "$new" worktree repair ${moved[@]+"${moved[@]}"} 2>&1); then
+    warn "git worktree repair failed in $new:"
+    indent "  " "$out" >&2
+    rc=1
+  fi
+  for wt in "${all[@]}"; do
+    if git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
+      say "  Repaired worktree $(display_path "$wt")"
+    else
+      warn "cannot repair worktree $wt"
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
 # adopt_one PATH: move one repository into the account held in the A_* variables.
 adopt_one() {
-  local path=$1 abs="" origin="" newurl="" owner="" suggest="" sub="" dest="" s="" https_host=""
-  local subs=()
+  local path=$1 abs="" origin="" newurl="" owner="" suggest="" sub="" dest="" s="" https_host="" wt=""
+  local subs=() wts=()
   abs=$(abs_path "$path") || { warn "no such directory: $path"; return 1; }
   if [ ! -d "$abs" ] || [ ! -e "$abs/.git" ]; then
     warn "not a git repository: $path"
@@ -1051,6 +1097,8 @@ adopt_one() {
     [ "$A_TYPE" = azure-devops ] && owner=${owner#v3/}
     owner=${owner%%/*}
   fi
+  while IFS= read -r wt; do wts+=("$wt"); done < <(linked_worktrees "$abs")
+  [ ${#wts[@]} -eq 0 ] || say "  Linked worktrees: ${#wts[@]}"
 
   if [ -n "$owner" ] && [ "$(lower "$owner")" = "$(lower "$A_USER")" ]; then
     suggest=my
@@ -1083,6 +1131,7 @@ adopt_one() {
   if confirm "  Move $(display_path "$abs") to $(display_path "$dest")?" y; then
     mv "$abs" "$dest" || { warn "cannot move $abs to $dest"; return 1; }
     say "  Moved to $(display_path "$dest")"
+    [ ${#wts[@]} -eq 0 ] || repair_worktrees "$abs" "$dest" "${wts[@]}" || return 1
   else
     say "  Not moved."
   fi

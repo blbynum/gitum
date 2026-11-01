@@ -245,6 +245,7 @@ Moves repositories into an account directory, one path at a time. For each path,
 5. Suggests `my` when the remote owner is the username and `contrib` otherwise, and asks for the subdirectory from the ones under the account.
 6. Refuses if the destination name exists.
 7. Moves the repository.
+8. If the repository has linked worktrees, runs `git worktree repair`, because the move breaks their links. Worktrees inside the repository move with it. Worktrees outside it stay where they are.
 
 Nothing changes without a yes. To move a repository from one account to another, run the same command.
 
