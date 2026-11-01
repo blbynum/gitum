@@ -82,6 +82,8 @@ cat > "$stub/ssh" <<'EOF'
 #!/usr/bin/env bash
 # test stub: answer like a git host, chosen by STUB_SSH_MODE
 printf '%s\n' "$@" > "$STUB_SSH_ARGS"
+# real ssh reads its stdin to forward it to the remote side; skip a terminal so a regression fails, not hangs
+[ -t 0 ] || cat > /dev/null
 key="" verbose=0
 while [ $# -gt 0 ]; do
   case $1 in
