@@ -428,6 +428,18 @@ out=$(printf 'clientco\ny\n' | gitum adopt github alice "$HOME/projects/clientwo
 eq "adopt into a custom subdirectory exits 0" "$rc" 0
 contains "custom subdirectory listed" "$out" "apps clientco contrib my view"
 ok "moved into clientco" test -d "$root/github/alice/clientco/clientwork/.git"
+mk_repo "$HOME/projects/wtproj"
+git -C "$HOME/projects/wtproj" -c user.name=T -c user.email=t@example.com commit -q -m init
+git -C "$HOME/projects/wtproj" worktree add -q "$HOME/projects/wtproj/.claude/worktrees/inside" -b inside
+git -C "$HOME/projects/wtproj" worktree add -q "$HOME/projects/wtproj-outside" -b outside
+out=$(printf '\ny\n' | gitum adopt github alice "$HOME/projects/wtproj" 2>&1); rc=$?
+eq "adopt with worktrees exits 0" "$rc" 0
+contains "worktrees counted before the move" "$out" "Linked worktrees: 2"
+contains "inside worktree repaired" "$out" "Repaired worktree ~/src/github/alice/contrib/wtproj/.claude/worktrees/inside"
+contains "outside worktree repaired" "$out" "Repaired worktree ~/projects/wtproj-outside"
+ok "inside worktree works after the move" git -C "$root/github/alice/contrib/wtproj/.claude/worktrees/inside" status -s
+ok "outside worktree works after the move" git -C "$HOME/projects/wtproj-outside" status -s
+lacks "no prunable worktrees after the move" "$(git -C "$root/github/alice/contrib/wtproj" worktree list --porcelain)" "prunable"
 out=$(gitum adopt github nobody "$HOME/projects/keep" 2>&1); rc=$?
 eq "adopt into an unknown account exits 1" "$rc" 1
 out=$(gitum adopt github alice 2>&1); rc=$?
