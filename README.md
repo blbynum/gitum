@@ -25,7 +25,7 @@ One source root per machine, chosen when `gitum init` runs (for example `~/src`)
     └── blbynum              the same username on another platform
 ```
 
-The platform layer exists because one username can exist on several platforms. The platform directory name defaults to the platform type and can differ, so two Forgejo servers can be `forgejo` and `forgejo-work`.
+The platform layer exists because one username can exist on several platforms. The platform directory is always the platform type, so each account directory is `<type>/<username>` under the root. Two accounts with the same type and username share one directory, so gitum refuses the second account, also when its host is different.
 
 ## How selection works
 
@@ -119,14 +119,13 @@ The installer is safe to re-run. Re-run it after you move the clone, for example
 
 ## Add an account
 
-`gitum add` asks for the platform type, the directory name, the host (for self-hosted types), the username, and the commit name and email. Pass the type and the username as arguments to skip those prompts:
+`gitum add` asks for the platform type, the host (for self-hosted types), the username, and the commit name and email. Pass the type and the username as arguments to skip those prompts:
 
 ```bash
 gitum add github blbynum
 ```
 
 ```text
-Directory name under ~/src [github]:
 Commit author name: Ben Bynum
 Commit author email: ben@example.com
 Added account github/blbynum
@@ -160,7 +159,7 @@ Then clone into the account directory, or move existing repositories with `gitum
 
 Conventions: plain text, no color; errors on stderr; exit status 1 for a failed operation and 2 for a usage error. `gitum` alone and `gitum help` print the usage. `gitum --version` prints the version. Before `init` has run, every other command says to run `install.sh`.
 
-In the synopses, `<platform>` is the platform directory name under the root (`github`, `forgejo-work`). `<type>` is a type from the platform table: `github`, `gitlab`, `bitbucket`, `forgejo`, `codeberg`, `gitea`, `azure-devops`, `sourcehut` or `other`.
+In the synopses, `<platform>` is the platform directory name under the root (`github`, `forgejo`). `<type>` is a type from the platform table: `github`, `gitlab`, `bitbucket`, `forgejo`, `codeberg`, `gitea`, `azure-devops`, `sourcehut` or `other`.
 
 ### gitum init [--root <path>]
 
@@ -189,7 +188,7 @@ The test adds `PasswordAuthentication=no` and `KbdInteractiveAuthentication=no`,
 One line per account, grouped by platform directory, with a marker when the key file is missing:
 
 ```text
-forgejo-work/benb        Ben Bynum <ben@example.com>              ~/.ssh/gitum/forgejo-work_benb  (key missing)
+forgejo/benb             Ben Bynum <ben@example.com>              ~/.ssh/gitum/forgejo_benb  (key missing)
 
 github/blbynum           Ben Bynum <ben@example.com>              ~/.ssh/gitum/github_blbynum
 ```

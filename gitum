@@ -84,7 +84,7 @@ Commands:
   --version                              Show the version
 
 <type> is a platform type from resources/platforms.tsv (github, gitlab, ...).
-<platform> is the platform directory name under the root (github, forgejo-work, ...).
+<platform> is the platform directory name under the root (github, forgejo, ...).
 EOF
 }
 
@@ -624,8 +624,7 @@ cmd_add() {
   else
     choose_platform
   fi
-  prompt_line dir "Directory name under $(display_path "$ROOT")" "$P_TYPE"
-  case $dir in ''|.|..|*/*|*[[:space:]]*) die "invalid directory name: $dir" ;; esac
+  dir=$P_TYPE
   if [ "$P_HOST" = "-" ]; then
     prompt_required host "Host name (for example git.example.com)"
   else

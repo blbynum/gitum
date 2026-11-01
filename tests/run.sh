@@ -174,8 +174,9 @@ eq "PATH line not duplicated" "$(grep -cF 'gitum: put ~/.local/bin on the PATH' 
 # ---------------------------------------------------------------- add
 
 section "add github alice"
-out=$(printf '\nAlice Example\nalice@example.com\ny\nn\n' | gitum add github alice 2>&1); rc=$?
+out=$(printf 'Alice Example\nalice@example.com\ny\nn\n' | gitum add github alice 2>&1); rc=$?
 eq "add exits 0" "$rc" 0
+lacks "add does not ask for a directory name" "$out" "Directory name"
 for d in apps contrib my view; do ok "github/alice/$d" test -d "$root/github/alice/$d"; done
 acfg="$HOME/.config/gitum/accounts/github/alice.gitconfig"
 ok "account config written" test -f "$acfg"
@@ -215,29 +216,29 @@ lacks "guide hides cat after clipboard copy" "$out" "cat ~/.ssh/gitum/github_ali
 contains "connection test offered" "$out" "Run the connection test now?"
 
 section "add forgejo bob, key declined"
-out=$(printf 'forgejo-work\ngit.example.com\nBob Builder\nbob@example.com\nn\n' | gitum add forgejo bob 2>&1); rc=$?
+out=$(printf 'git.example.com\nBob Builder\nbob@example.com\nn\n' | gitum add forgejo bob 2>&1); rc=$?
 eq "add exits 0" "$rc" 0
-bcfg="$HOME/.config/gitum/accounts/forgejo-work/bob.gitconfig"
+bcfg="$HOME/.config/gitum/accounts/forgejo/bob.gitconfig"
 eq "gitum.host" "$(git config -f "$bcfg" --get gitum.host)" git.example.com
-eq "gitum.dir" "$(git config -f "$bcfg" --get gitum.dir)" forgejo-work
+eq "gitum.dir" "$(git config -f "$bcfg" --get gitum.dir)" forgejo
 eq "insteadOf" "$(git config -f "$bcfg" --get 'url.git@git.example.com:.insteadOf')" "https://git.example.com/"
-ok "bob directory tree" test -d "$root/forgejo-work/bob/my"
-contains "guide shows keygen" "$out" 'ssh-keygen -t ed25519 -f ~/.ssh/gitum/forgejo-work_bob -C "bob@forgejo-work (gitum)"'
-contains "guide shows cat" "$out" "cat ~/.ssh/gitum/forgejo-work_bob.pub"
+ok "bob directory tree" test -d "$root/forgejo/bob/my"
+contains "guide shows keygen" "$out" 'ssh-keygen -t ed25519 -f ~/.ssh/gitum/forgejo_bob -C "bob@forgejo (gitum)"'
+contains "guide shows cat" "$out" "cat ~/.ssh/gitum/forgejo_bob.pub"
 contains "guide: host settings URL" "$out" "https://git.example.com/user/settings/keys"
-contains "guide: test command" "$out" "gitum test forgejo-work bob"
+contains "guide: test command" "$out" "gitum test forgejo bob"
 lacks "no connection test without a key" "$out" "Run the connection test now?"
 out=$(gitum list 2>&1)
-contains "list shows bob" "$out" "forgejo-work/bob"
+contains "list shows bob" "$out" "forgejo/bob"
 contains "list marks the missing key" "$out" "(key missing)"
 mkdir -p "$HOME/.ssh/gitum"
-"$real_keygen" -q -t ed25519 -N '' -f "$HOME/.ssh/gitum/forgejo-work_bob" -C test
+"$real_keygen" -q -t ed25519 -N '' -f "$HOME/.ssh/gitum/forgejo_bob" -C test
 
 section "duplicate accounts"
-out=$(printf '\nX\nx@example.com\n' | gitum add github alice 2>&1); rc=$?
+out=$(printf 'X\nx@example.com\n' | gitum add github alice 2>&1); rc=$?
 eq "duplicate add exits 1" "$rc" 1
 contains "duplicate add warns" "$out" "already exists"
-out=$(printf '\nX\nx@example.com\n' | gitum add github Alice 2>&1); rc=$?
+out=$(printf 'X\nx@example.com\n' | gitum add github Alice 2>&1); rc=$?
 eq "case clash exits 1" "$rc" 1
 out=$(gitum add nope 2>&1); rc=$?
 eq "unknown type exits 2" "$rc" 2
@@ -252,7 +253,7 @@ eq "list exits 0" "$rc" 0
 contains "list alice" "$out" "github/alice"
 contains "list alice identity" "$out" "Alice Example <alice@example.com>"
 contains "list alice key" "$out" "~/.ssh/gitum/github_alice"
-contains "list bob" "$out" "forgejo-work/bob"
+contains "list bob" "$out" "forgejo/bob"
 lacks "no missing marker once the key exists" "$out" "(key missing)"
 out=$(gitum list github 2>&1)
 contains "filtered list has alice" "$out" "github/alice"
@@ -326,7 +327,7 @@ contains "unreachable explained" "$out" "could not connect"
 out=$(STUB_SSH_MODE=ok gitum test 2>&1); rc=$?
 eq "test all exits 1 when one account fails" "$rc" 1
 contains "test all: alice passes" "$out" "github/alice: PASS"
-contains "test all: bob fails on the greeting" "$out" "forgejo-work/bob: FAIL"
+contains "test all: bob fails on the greeting" "$out" "forgejo/bob: FAIL"
 contains "test all: summary" "$out" "1 of 2 account(s) passed."
 out=$(gitum test github nobody 2>&1); rc=$?
 eq "unknown account exits 1" "$rc" 1
@@ -349,11 +350,11 @@ out=$(STUB_SSH_MODE=ok gitum test github alice 2>&1)
 contains "overlap names file and line" "$out" "~/.ssh/config:2 applies to github.com"
 lacks "unrelated Host block not reported" "$out" "config:4"
 contains "overlap explained" "$out" "after the gitum key"
-out=$(STUB_SSH_MODE=ok gitum test forgejo-work bob 2>&1)
+out=$(STUB_SSH_MODE=ok gitum test forgejo bob 2>&1)
 contains "Match block reported" "$out" "~/.ssh/config:6 applies to git.example.com"
 contains "Include file reported" "$out" "~/.ssh/conf.d/extra:2 applies to git.example.com"
 lacks "github block not reported for bob" "$out" "config:2"
-out=$(printf '\nEve E\neve@example.com\nn\n' | gitum add github eve 2>&1)
+out=$(printf 'Eve E\neve@example.com\nn\n' | gitum add github eve 2>&1)
 contains "add warns about overlap" "$out" "~/.ssh/config:2 applies to github.com"
 rm -f "${HOME:?}/.ssh/config"
 
@@ -388,11 +389,11 @@ mk_repo "$HOME/projects/keep"
 out=$(printf '\nn\n' | gitum adopt github alice "$HOME/projects/keep" 2>&1); rc=$?
 eq "declined move exits 0" "$rc" 0
 ok "declined move leaves the repo" test -d "$HOME/projects/keep/.git"
-out=$(printf 'n\n\ny\n' | gitum adopt forgejo-work bob "$root/github/alice/contrib/lib" 2>&1); rc=$?
+out=$(printf 'n\n\ny\n' | gitum adopt forgejo bob "$root/github/alice/contrib/lib" 2>&1); rc=$?
 eq "adopt between accounts exits 0" "$rc" 0
-ok "moved to bob/contrib" test -d "$root/forgejo-work/bob/contrib/lib/.git"
-eq "remote kept when the rewrite is declined" "$(git -C "$root/forgejo-work/bob/contrib/lib" remote get-url origin)" "git@github.com:someone/lib.git"
-eq "identity follows the move" "$(git -C "$root/forgejo-work/bob/contrib/lib" config user.name)" "Bob Builder"
+ok "moved to bob/contrib" test -d "$root/forgejo/bob/contrib/lib/.git"
+eq "remote kept when the rewrite is declined" "$(git -C "$root/forgejo/bob/contrib/lib" remote get-url origin)" "git@github.com:someone/lib.git"
+eq "identity follows the move" "$(git -C "$root/forgejo/bob/contrib/lib" config user.name)" "Bob Builder"
 mkdir -p "$root/github/alice/clientco"
 mk_repo "$HOME/projects/clientwork"
 out=$(printf 'clientco\ny\n' | gitum adopt github alice "$HOME/projects/clientwork" 2>&1); rc=$?
@@ -405,7 +406,7 @@ out=$(gitum adopt github alice 2>&1); rc=$?
 eq "adopt without paths exits 2" "$rc" 2
 
 section "azure-devops"
-out=$(printf '\nDana Dev\ndana@example.com\nn\n' | gitum add azure-devops dana 2>&1); rc=$?
+out=$(printf 'Dana Dev\ndana@example.com\nn\n' | gitum add azure-devops dana 2>&1); rc=$?
 eq "add azure exits 0" "$rc" 0
 contains "azure keygen is rsa" "$out" 'ssh-keygen -t rsa -b 4096 -f ~/.ssh/gitum/azure-devops_dana -C "dana@azure-devops (gitum)"'
 contains "azure settings url" "$out" "https://dev.azure.com/<organization>/_usersSettings/keys"
@@ -427,7 +428,7 @@ out=$(printf 'y\n' | gitum delete github alice 2>&1); rc=$?
 eq "delete non-empty exits 1" "$rc" 1
 contains "delete lists what is in the way" "$out" "aliceproj"
 ok "alice config survives" test -f "$acfg"
-printf '\nCarol C\ncarol@example.com\nn\n' | gitum add gitlab carol >/dev/null 2>&1
+printf 'Carol C\ncarol@example.com\nn\n' | gitum add gitlab carol >/dev/null 2>&1
 "$real_keygen" -q -t ed25519 -N '' -f "$HOME/.ssh/gitum/gitlab_carol" -C test
 out=$(printf 'n\n' | gitum delete gitlab carol 2>&1); rc=$?
 eq "delete declined exits 0" "$rc" 0
@@ -442,12 +443,12 @@ lacks "includeIf removed" "$(cat "$HOME/.config/gitum/gitconfig")" "carol"
 ok "key kept" test -f "$HOME/.ssh/gitum/gitlab_carol"
 contains "kept key path printed" "$out" "~/.ssh/gitum/gitlab_carol.pub"
 contains "registration reminder" "$out" "stays registered on gitlab.com"
-printf '\nCarol C\ncarol@example.com\nn\n' | gitum add gitlab carol >/dev/null 2>&1
+printf 'Carol C\ncarol@example.com\nn\n' | gitum add gitlab carol >/dev/null 2>&1
 out=$(printf 'y\ny\n' | gitum delete gitlab carol 2>&1); rc=$?
 eq "delete with keys exits 0" "$rc" 0
 ok "private key deleted" test ! -e "$HOME/.ssh/gitum/gitlab_carol"
 ok "public key deleted" test ! -e "$HOME/.ssh/gitum/gitlab_carol.pub"
-printf '\nCarol C\ncarol@example.com\nn\n' | gitum add gitlab carol >/dev/null 2>&1
+printf 'Carol C\ncarol@example.com\nn\n' | gitum add gitlab carol >/dev/null 2>&1
 printf 'keep\n' > "$root/gitlab/README"
 printf 'y\n' | gitum delete gitlab carol >/dev/null 2>&1
 ok "platform directory with other content stays" test -f "$root/gitlab/README"
