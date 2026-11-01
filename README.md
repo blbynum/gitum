@@ -173,7 +173,7 @@ Adds an account, as described under "Add an account". If the account's directory
 
 ### gitum test [<platform> <username>]
 
-Runs `ssh -T` against the account's host with the account's key and options. With no arguments it tests every account. Pass means that the server accepted the key. gitum prints the server greeting and, where the platform table has a greeting pattern, checks that the greeting names the username, so a key registered to the wrong account is reported. Azure DevOps answers that shell access is unsupported, so there the pass is authentication alone.
+Runs `ssh -T` against the account's host with the account's key and options. With no arguments it tests every account. Pass means that the server accepted the gitum key of the account. gitum runs ssh with `-v` and reads which key the server accepted. If the server accepted another key, for example one that `~/.ssh/config` adds, the test fails and names that key. gitum prints the server greeting and, where the platform table has a greeting pattern, checks that the greeting names the username, so a key registered to the wrong account is reported. Azure DevOps answers that shell access is unsupported, so there the pass is authentication alone.
 
 ```text
 github/blbynum: ssh -T git@github.com with key ~/.ssh/gitum/github_blbynum
@@ -181,7 +181,7 @@ github/blbynum: ssh -T git@github.com with key ~/.ssh/gitum/github_blbynum
 github/blbynum: PASS
 ```
 
-The test adds `PasswordAuthentication=no` and `KbdInteractiveAuthentication=no`, so that a rejected key fails instead of a password prompt. The first connection to a host still asks you to confirm the host key.
+The test adds `PasswordAuthentication=no` and `KbdInteractiveAuthentication=no`, so that a rejected key fails instead of a password prompt. It also adds `ControlPath=none`, so that ssh authenticates again instead of reusing a shared connection. The first connection to a host still asks you to confirm the host key.
 
 ### gitum list [<platform>]
 
@@ -245,7 +245,7 @@ After one confirmation, gitum removes the account config, its `includeIf` rule a
 
 ## Overlap with ~/.ssh/config
 
-gitum leaves `~/.ssh/config` alone. If that file has an `IdentityFile` or `IdentityAgent` entry that applies to an account's host, ssh tries that key after the gitum key. A gitum key that is not yet registered on the platform would then authenticate as whichever account owns the other key, with no error. `gitum add` and `gitum test` warn when such an entry exists, with the file and the line:
+gitum leaves `~/.ssh/config` alone. If that file has an `IdentityFile` or `IdentityAgent` entry that applies to an account's host, ssh offers that key too. ssh offers the keys that ssh-agent holds before the keys that it reads from files. So when ssh-agent holds the other key and not the gitum key, ssh offers the other key first. If the platform accepts the other key, ssh authenticates as whichever account owns it, with no error. `gitum test` then fails and names the key that the platform accepted. `gitum add` and `gitum test` warn when such an entry exists, with the file and the line:
 
 ```text
 gitum: warning: ~/.ssh/config:2 applies to github.com: IdentityFile ~/.ssh/id_ed25519

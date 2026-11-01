@@ -439,7 +439,7 @@ warn_ssh_overlap() {
   SSH_OVERLAP=0
   scan_ssh_config "$SSH_CONFIG" "$host" 0
   if [ "$SSH_OVERLAP" = 1 ]; then
-    warn "ssh tries the key(s) above after the gitum key. A gitum key that is not registered on $host would then authenticate as whichever account owns that key. Move those lines under a Host alias that git does not use, or remove them."
+    warn "ssh offers the key(s) above too: before the gitum key when ssh-agent holds them, after it otherwise. If $host accepts one of them, ssh authenticates as whichever account owns that key. Move those lines under a Host alias that git does not use, or remove them."
   fi
 }
 
@@ -726,21 +726,24 @@ cmd_add() {
 # ---------------------------------------------------------------- test
 
 # test_account PLATFORM-DIR USERNAME: run ssh with the account's options; 0 on pass.
+# ssh runs with -v so that the test can read which key the server accepted.
 test_account() {
-  local dir=$1 user=$2 cfg="" type="" host="" sshcmd="" key="" out="" rc=0 pattern="" w=""
+  local dir=$1 user=$2 cfg="" type="" host="" sshcmd="" key="" keyfile="" out="" shown="" accepted=""
+  local rc=0 pattern="" w=""
   local words=() args=()
   cfg=$(account_config "$dir" "$user")
   [ -f "$cfg" ] || { warn "no such account: $dir/$user"; return 1; }
   type=$(cfg_get "$cfg" gitum.type)
   host=$(cfg_get "$cfg" gitum.host)
   key=$(cfg_get "$cfg" gitum.key)
+  keyfile=$(expand_tilde "$key")
   sshcmd=$(cfg_get "$cfg" core.sshCommand)
   [ -n "$sshcmd" ] || { warn "$dir/$user: no core.sshCommand in $cfg"; return 1; }
   if ! platform_lookup "$type"; then
     P_SSH_USER=git
     P_GREETING="-"
   fi
-  [ -f "$(expand_tilde "$key")" ] || warn "$dir/$user: key file $key is missing"
+  [ -f "$keyfile" ] || warn "$dir/$user: key file $key is missing"
   warn_ssh_overlap "$host"
 
   read -ra words <<< "$sshcmd"
@@ -748,14 +751,36 @@ test_account() {
     args+=("$(expand_tilde "$w")")
   done
   say "$dir/$user: ssh -T $P_SSH_USER@$host with key $key"
-  out=$("${args[@]}" -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -T "$P_SSH_USER@$host" 2>&1)
+  out=$("${args[@]}" -v -o ControlPath=none -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no \
+    -T "$P_SSH_USER@$host" 2>&1)
   rc=$?
-  [ -z "$out" ] || indent "  | " "$out"
+  shown=$(printf '%s\n' "$out" | grep -vE '^(debug[0-9]: |OpenSSH_|Authenticated to |Transferred: |Bytes per second: )')
+  [ -z "$shown" ] || indent "  | " "$shown"
 
   if printf '%s\n' "$out" | grep -q 'Permission denied'; then
     say "$dir/$user: FAIL - $host did not accept the key $key. Register the public key for $user, then run the test again."
     return 1
   fi
+  # The server answers each offered key before ssh offers the next one, so the last key offered
+  # before "Server accepts key" is the accepted one. Old and new OpenSSH both print its path there.
+  accepted=$(printf '%s\n' "$out" | awk '
+    /Offering .*public key: / { k = $0; sub(/.*public key: /, "", k) }
+    /Server accepts key/ { print (k == "" ? "unknown" : k); exit }')
+  if [ -z "$accepted" ]; then
+    if [ "$rc" -eq 255 ]; then
+      say "$dir/$user: FAIL - could not connect to $host (ssh exit status 255)"
+      return 1
+    fi
+    say "$dir/$user: FAIL - ssh did not report which key $host accepted, so the test cannot confirm $key."
+    return 1
+  fi
+  case " $accepted " in
+    *" $keyfile "*) ;;
+    *)
+      say "$dir/$user: FAIL - $host accepted another key, not $key: $accepted. An IdentityFile entry in the ssh configuration for $host adds that key. Remove the entry, then run the test again."
+      return 1
+      ;;
+  esac
   if [ "$P_GREETING" != "-" ]; then
     pattern=${P_GREETING//'{{USERNAME}}'/$user}
     if printf '%s\n' "$out" | grep -qF -- "$pattern"; then

@@ -80,19 +80,34 @@ cat > "$stub/ssh" <<'EOF'
 #!/usr/bin/env bash
 # test stub: answer like a git host, chosen by STUB_SSH_MODE
 printf '%s\n' "$@" > "$STUB_SSH_ARGS"
-key=""
+key="" verbose=0
 while [ $# -gt 0 ]; do
   case $1 in
     -i) key=$2; shift 2 ;;
+    -v) verbose=1; shift ;;
     *) shift ;;
   esac
 done
 user=${key##*_}
+# offer KEY yes|no: print what ssh -v prints when it offers KEY and the server accepts or rejects it
+offer() {
+  [ "$verbose" = 1 ] || return 0
+  printf 'debug1: Offering public key: %s ED25519 SHA256:stub explicit\n' "$1" >&2
+  if [ "$2" = yes ]; then
+    printf 'debug1: Server accepts key: %s ED25519 SHA256:stub explicit\n' "$1" >&2
+    printf 'Authenticated to github.com ([192.0.2.1]:22) using "publickey".\n' >&2
+  else
+    printf 'debug1: Authentications that can continue: publickey\n' >&2
+  fi
+}
+greet() { printf "Hi %s! You've successfully authenticated, but GitHub does not provide shell access.\n" "$1" >&2; }
 case ${STUB_SSH_MODE:-ok} in
-  ok) printf "Hi %s! You've successfully authenticated, but GitHub does not provide shell access.\n" "$user" >&2; exit 1 ;;
-  wronguser) printf "Hi someone-else! You've successfully authenticated, but GitHub does not provide shell access.\n" >&2; exit 1 ;;
-  azure) printf 'remote: Shell access is not supported.\nshell request failed on channel 0\n' >&2; exit 255 ;;
-  denied) printf 'git@github.com: Permission denied (publickey).\n' >&2; exit 255 ;;
+  ok) offer "$key" yes; greet "$user"; exit 1 ;;
+  wronguser) offer "$key" yes; greet someone-else; exit 1 ;;
+  otherkey) offer "$HOME/.ssh/github" yes; greet "$user"; exit 1 ;;
+  nokey) greet "$user"; exit 1 ;;
+  azure) offer "$key" yes; printf 'remote: Shell access is not supported.\nshell request failed on channel 0\n' >&2; exit 255 ;;
+  denied) offer "$key" no; printf 'git@github.com: Permission denied (publickey).\n' >&2; exit 255 ;;
   unreachable) printf 'ssh: Could not resolve hostname github.com: nodename nor servname provided, or not known\n' >&2; exit 255 ;;
   *) exit 255 ;;
 esac
@@ -310,10 +325,14 @@ out=$(STUB_SSH_MODE=ok gitum test github alice 2>&1); rc=$?
 eq "test pass exits 0" "$rc" 0
 contains "test PASS" "$out" "github/alice: PASS"
 contains "greeting printed" "$out" "Hi alice!"
+lacks "ssh debug lines hidden" "$out" "debug1:"
+lacks "ssh verbose lines hidden" "$out" "Authenticated to"
 args=$(tr '\n' ' ' < "$STUB_SSH_ARGS")
 contains "ssh -i key" "$args" "-i $HOME/.ssh/gitum/github_alice "
 contains "ssh IdentitiesOnly" "$args" "-o IdentitiesOnly=yes "
 contains "ssh AddKeysToAgent" "$args" "-o AddKeysToAgent=yes "
+contains "ssh -v" "$args" " -v "
+contains "ssh ControlPath none" "$args" "-o ControlPath=none "
 contains "ssh -T target" "$args" "-T git@github.com"
 out=$(STUB_SSH_MODE=denied gitum test github alice 2>&1); rc=$?
 eq "denied exits 1" "$rc" 1
@@ -324,6 +343,13 @@ contains "wrong user explained" "$out" "does not name alice"
 out=$(STUB_SSH_MODE=unreachable gitum test github alice 2>&1); rc=$?
 eq "unreachable exits 1" "$rc" 1
 contains "unreachable explained" "$out" "could not connect"
+out=$(STUB_SSH_MODE=otherkey gitum test github alice 2>&1); rc=$?
+eq "other key exits 1" "$rc" 1
+contains "other key named" "$out" "accepted another key, not ~/.ssh/gitum/github_alice: $HOME/.ssh/github ED25519"
+lacks "other key is not a pass" "$out" "PASS"
+out=$(STUB_SSH_MODE=nokey gitum test github alice 2>&1); rc=$?
+eq "unreported key exits 1" "$rc" 1
+contains "unreported key explained" "$out" "cannot confirm ~/.ssh/gitum/github_alice"
 out=$(STUB_SSH_MODE=ok gitum test 2>&1); rc=$?
 eq "test all exits 1 when one account fails" "$rc" 1
 contains "test all: alice passes" "$out" "github/alice: PASS"
@@ -349,7 +375,7 @@ printf 'Host *.example.com\n  IdentityFile ~/.ssh/wild\n' > "$HOME/.ssh/conf.d/e
 out=$(STUB_SSH_MODE=ok gitum test github alice 2>&1)
 contains "overlap names file and line" "$out" "~/.ssh/config:2 applies to github.com"
 lacks "unrelated Host block not reported" "$out" "config:4"
-contains "overlap explained" "$out" "after the gitum key"
+contains "overlap explained" "$out" "before the gitum key when ssh-agent holds them"
 out=$(STUB_SSH_MODE=ok gitum test forgejo bob 2>&1)
 contains "Match block reported" "$out" "~/.ssh/config:6 applies to git.example.com"
 contains "Include file reported" "$out" "~/.ssh/conf.d/extra:2 applies to git.example.com"
